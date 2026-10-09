@@ -8,7 +8,6 @@ import {
   BEATS,
   N_EARTH,
   N_PATCH,
-  N_HAZE,
   N_STAR,
   N_PLANE,
   N_TRAIL,
@@ -19,7 +18,6 @@ import {
   earthVert,
   earthFrag,
   starsVert,
-  hazeVert,
   simpleFrag,
   planeVert,
   trailVert,
@@ -98,11 +96,11 @@ function unprojectSky(sx: number, sy: number, yWorld: number, pitch: number, vfo
   const vx = ndcX * aspect / f;
   const vy = ndcY / f;
   const vz = -1;
-  // rotate from view → world: rotate by +pitch around X
+  // rotate view → world by +pitch around X: R_x(θ)·(vx,vy,vz)
   const c = Math.cos(pitch), s = Math.sin(pitch);
   const wx = vx;
-  const wy = c * vy + s * vz;
-  const wz = -s * vy + c * vz;
+  const wy = c * vy - s * vz;
+  const wz = s * vy + c * vz;
   // ray from origin, intersect y = yWorld plane
   const tt = Math.abs(wy) < 1e-9 ? 1 : yWorld / wy;
   return [wx * tt, yWorld, wz * tt];
@@ -300,16 +298,20 @@ export default function Scene({
     const fbo = gl.createFramebuffer()!;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, fieldTex, 0);
-
-    const fieldFloat = useFloat16 ? new Float32Array(RW * RH * 4) : null;
-    const fieldBytes = useFloat16 ? null : new Uint8Array(RW * RH * 4);
-    const resizeReadBuffers = () => {
-      if (useFloat16) {
-        // Reallocate
-        (fieldFloat as unknown as { length: number }).length = RW * RH * 4;
+    {
+      const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+      if (status !== gl.FRAMEBUFFER_COMPLETE) {
+        setDisabled(true);
+        gl.deleteFramebuffer(fbo);
+        gl.deleteTexture(fieldTex);
+        pre.remove();
+        return;
       }
-    };
-    resizeReadBuffers();
+    }
+
+    // Readback buffers (reassigned on resize).
+    let readFloat: Float32Array | null = useFloat16 ? new Float32Array(RW * RH * 4) : null;
+    let readBytes: Uint8Array | null = useFloat16 ? null : new Uint8Array(RW * RH * 4);
 
     // ── Landmask texture ───────────────────────────────────────────────────
     const landTex = gl.createTexture()!;
@@ -379,13 +381,7 @@ export default function Scene({
       starData[i * 3 + 2] = rand();
     }
 
-    // haze: 3 floats (u, v, r)
-    const hazeData = new Float32Array(N_HAZE * 3);
-    for (let i = 0; i < N_HAZE; i++) {
-      hazeData[i * 3 + 0] = rand();
-      hazeData[i * 3 + 1] = rand();
-      hazeData[i * 3 + 2] = rand();
-    }
+    // (haze buffer removed — surface particles become haze via earth shader §C)
 
     // plane: rejection-sample inside planform. 2 floats (lat, along)
     const planeData = new Float32Array(N_PLANE * 2);
@@ -422,7 +418,6 @@ export default function Scene({
     // ── Compile programs ───────────────────────────────────────────────────
     const progEarth = link(gl, earthVert, earthFrag);
     const progStars = link(gl, starsVert, simpleFrag);
-    const progHaze = link(gl, hazeVert, simpleFrag);
     const progPlane = link(gl, planeVert, simpleFrag);
     const progTrail = link(gl, trailVert, simpleFrag);
 
@@ -435,7 +430,6 @@ export default function Scene({
     const bufEarth = mkBuf(earthData);
     const bufPatch = mkBuf(patchData);
     const bufStars = mkBuf(starData);
-    const bufHaze = mkBuf(hazeData);
     const bufPlane = mkBuf(planeData);
     const bufTrail = mkBuf(trailData);
 
@@ -454,14 +448,6 @@ export default function Scene({
       gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, stride, 0);
       gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 1, gl.FLOAT, false, stride, 8);
       gl.disableVertexAttribArray(2);
-      gl.disableVertexAttribArray(3);
-    };
-    const bindHazeVAO = () => {
-      gl.bindBuffer(gl.ARRAY_BUFFER, bufHaze);
-      const stride = 3 * 4;
-      gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 1, gl.FLOAT, false, stride, 0);
-      gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 1, gl.FLOAT, false, stride, 4);
-      gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 1, gl.FLOAT, false, stride, 8);
       gl.disableVertexAttribArray(3);
     };
     const bindPlaneVAO = () => {
@@ -515,16 +501,36 @@ export default function Scene({
       glCanvas.width = RW;
       glCanvas.height = RH;
       makeFieldTex();
-      if (useFloat16) {
-        (ReadBuffers.float as Float32Array | null) = new Float32Array(RW * RH * 4);
-      } else {
-        (ReadBuffers.bytes as Uint8Array | null) = new Uint8Array(RW * RH * 4);
-      }
+      if (useFloat16) readFloat = new Float32Array(RW * RH * 4);
+      else readBytes = new Uint8Array(RW * RH * 4);
       fitText();
     };
-    const ReadBuffers = { float: fieldFloat, bytes: fieldBytes };
     const ro = new ResizeObserver(applyResize);
     ro.observe(mount);
+    // R5: DPR change (monitor move, zoom) — re-run full resize.
+    let lastDpr = window.devicePixelRatio;
+    const onWinResize = () => {
+      if (window.devicePixelRatio !== lastDpr) {
+        lastDpr = window.devicePixelRatio;
+      }
+      applyResize();
+    };
+    window.addEventListener("resize", onWinResize);
+    let dprMql: MediaQueryList | null = null;
+    const attachDprListener = () => {
+      try {
+        const q = `(resolution: ${window.devicePixelRatio}dppx)`;
+        const next = window.matchMedia(q);
+        const handler = () => {
+          applyResize();
+          attachDprListener(); // re-arm at new DPR
+        };
+        dprMql?.removeEventListener?.("change", handler);
+        next.addEventListener?.("change", handler);
+        dprMql = next;
+      } catch {}
+    };
+    attachDprListener();
 
     // Scroll + reduced-motion + visibility
     let scrollTarget = 0;
@@ -562,13 +568,25 @@ export default function Scene({
     let lowFpsAccum = 0;
     let lowPower = false;
 
+    // ?t=X query freeze (spec §B inspection hook)
+    let tFreeze: number | null = null;
+    try {
+      const qt = new URL(window.location.href).searchParams.get("t");
+      const qf = qt == null ? NaN : parseFloat(qt);
+      if (Number.isFinite(qf)) tFreeze = qf;
+    } catch {}
+
     const requestOne = () => { if (rafId === 0) rafId = requestAnimationFrame(frame); };
 
-    const frame = () => {
+    const frame = (tOverride?: number) => {
       rafId = 0;
-      if (paused) return;
+      if (paused && tOverride === undefined) return;
       const now = performance.now();
-      const tSec = reduceMotion ? 21.76 : Math.max(0, (now - startedAt - totalHiddenMs) / 1000);
+      let tSec: number;
+      if (typeof tOverride === "number") tSec = tOverride;
+      else if (tFreeze !== null) tSec = tFreeze;
+      else if (reduceMotion) tSec = 21.76;
+      else tSec = Math.max(0, (now - startedAt - totalHiddenMs) / 1000);
       const dt = Math.min(0.05, (now - lastFrame) / 1000);
       lastFrame = now;
       scrollNorm += (scrollTarget - scrollNorm) * (1 - Math.exp(-6 * dt));
@@ -624,66 +642,55 @@ export default function Scene({
       const starsT = Math.min(Math.max((tSec - BEATS.starsFadeStart) / 1.2, 0), 1);
       const starsFade = 1 - easeIO(starsT);
 
-      // ── Scene A: stars + earth + patch (if intro still active, ~ tSec < 7) ─
-      if (tSec < 8.0 && liftE < 1.0) {
-        if (starsFade > 0.001) {
-          gl.useProgram(progStars);
-          bindStarsVAO();
-          const uFade = gl.getUniformLocation(progStars, "uFade")!;
-          const uBS = gl.getUniformLocation(progStars, "uBScale")!;
-          const uBB = gl.getUniformLocation(progStars, "uBase")!;
-          gl.uniform1f(uFade, starsFade);
-          gl.uniform1f(uBS, bScale);
-          gl.uniform1f(uBB, B.STAR);
-          gl.drawArrays(gl.POINTS, 0, N_STAR);
-          // Second point per star (x+1 pixel)
-          const uFade2 = gl.getUniformLocation(progStars, "uFade")!;
-          // Draw second instance by shifting via a tiny trick: just re-draw (no shift) — stars appear 1 point already visible.
-          void uFade2;
-        }
+      // ── Low-power reduce (R4): half particles, double B. ───────────────────
+      const drawFrac = lowPower ? 0.5 : 1.0;
+      const bMult = lowPower ? 2.0 : 1.0;
+      const bScaleEff = bScale * bMult;
 
-        gl.useProgram(progEarth);
-        gl.uniformMatrix3fv(gl.getUniformLocation(progEarth, "uRot")!, false, rotMat);
-        gl.uniform1f(gl.getUniformLocation(progEarth, "uDist")!, distR);
-        gl.uniform1f(gl.getUniformLocation(progEarth, "uF")!, fVal);
-        gl.uniform1f(gl.getUniformLocation(progEarth, "uAspect")!, aspect);
-        gl.uniform1f(gl.getUniformLocation(progEarth, "uTime")!, tSec);
-        gl.uniform1f(gl.getUniformLocation(progEarth, "uBScale")!, bScale);
-        gl.uniform1f(gl.getUniformLocation(progEarth, "uLift")!, liftE);
-        gl.uniform1f(gl.getUniformLocation(progEarth, "uLook")!, lookE);
-        gl.uniform1f(gl.getUniformLocation(progEarth, "uHorizonY")!, horizonY);
-        gl.uniform1f(gl.getUniformLocation(progEarth, "uTop")!, topVal);
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, landTex);
-        gl.uniform1i(gl.getUniformLocation(progEarth, "uLandMask")!, 0);
-
-        // Earth global
-        bindEarthVAO(bufEarth);
-        gl.uniform1f(gl.getUniformLocation(progEarth, "uBase")!, B.EARTH);
-        gl.uniform1f(gl.getUniformLocation(progEarth, "uIsPatch")!, 0);
-        gl.uniform1f(gl.getUniformLocation(progEarth, "uZoom")!, zoomE);
-        gl.drawArrays(gl.POINTS, 0, N_EARTH);
-
-        // Earth patch
-        bindEarthVAO(bufPatch);
-        gl.uniform1f(gl.getUniformLocation(progEarth, "uBase")!, B.PATCH);
-        gl.uniform1f(gl.getUniformLocation(progEarth, "uIsPatch")!, 1);
-        gl.uniform1f(gl.getUniformLocation(progEarth, "uZoom")!, zoomE);
-        gl.drawArrays(gl.POINTS, 0, N_PATCH);
+      // Stars — only during intro. Draw twice (x and x+1 field pixel) per §A 1c.
+      if (starsFade > 0.001 && liftE < 1.0) {
+        gl.useProgram(progStars);
+        bindStarsVAO();
+        gl.uniform1f(gl.getUniformLocation(progStars, "uFade")!, starsFade);
+        gl.uniform1f(gl.getUniformLocation(progStars, "uBScale")!, bScaleEff);
+        gl.uniform1f(gl.getUniformLocation(progStars, "uBase")!, B.STAR);
+        const uShiftX = gl.getUniformLocation(progStars, "uShiftX")!;
+        gl.uniform1f(uShiftX, 0);
+        gl.drawArrays(gl.POINTS, 0, Math.floor(N_STAR * drawFrac));
+        gl.uniform1f(uShiftX, 2 / RW); // 1 field-pixel in NDC
+        gl.drawArrays(gl.POINTS, 0, Math.floor(N_STAR * drawFrac));
       }
 
-      // ── Scene B: haze + plane + trail (after lift starts) ─────────────────
-      if (liftE > 0.001) {
-        gl.useProgram(progHaze);
-        bindHazeVAO();
-        gl.uniform1f(gl.getUniformLocation(progHaze, "uTime")!, tSec);
-        gl.uniform1f(gl.getUniformLocation(progHaze, "uLift")!, liftE);
-        gl.uniform1f(gl.getUniformLocation(progHaze, "uBScale")!, bScale);
-        gl.uniform1f(gl.getUniformLocation(progHaze, "uBase")!, B.HAZE);
-        gl.uniform1f(gl.getUniformLocation(progHaze, "uHorizonY")!, horizonY);
-        gl.uniform1f(gl.getUniformLocation(progHaze, "uTop")!, topVal);
-        gl.drawArrays(gl.POINTS, 0, N_HAZE);
-      }
+      // Earth (global + patch). Shader handles back-cull + per-particle lift →
+      // haze transition (R3 §C). Rendered on every frame once t ≥ 0.
+      gl.useProgram(progEarth);
+      gl.uniformMatrix3fv(gl.getUniformLocation(progEarth, "uRot")!, false, rotMat);
+      gl.uniform1f(gl.getUniformLocation(progEarth, "uDist")!, distR);
+      gl.uniform1f(gl.getUniformLocation(progEarth, "uF")!, fVal);
+      gl.uniform1f(gl.getUniformLocation(progEarth, "uAspect")!, aspect);
+      gl.uniform1f(gl.getUniformLocation(progEarth, "uTime")!, tSec);
+      gl.uniform1f(gl.getUniformLocation(progEarth, "uT")!, tSec);
+      gl.uniform1f(gl.getUniformLocation(progEarth, "uBScale")!, bScaleEff);
+      gl.uniform1f(gl.getUniformLocation(progEarth, "uBHaze")!, B.HAZE);
+      gl.uniform1f(gl.getUniformLocation(progEarth, "uLift")!, liftE);
+      gl.uniform1f(gl.getUniformLocation(progEarth, "uLook")!, lookE);
+      gl.uniform1f(gl.getUniformLocation(progEarth, "uHorizonY")!, horizonY);
+      gl.uniform1f(gl.getUniformLocation(progEarth, "uTop")!, topVal);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, landTex);
+      gl.uniform1i(gl.getUniformLocation(progEarth, "uLandMask")!, 0);
+
+      bindEarthVAO(bufEarth);
+      gl.uniform1f(gl.getUniformLocation(progEarth, "uBase")!, B.EARTH);
+      gl.uniform1f(gl.getUniformLocation(progEarth, "uIsPatch")!, 0);
+      gl.uniform1f(gl.getUniformLocation(progEarth, "uZoom")!, zoomE);
+      gl.drawArrays(gl.POINTS, 0, Math.floor(N_EARTH * drawFrac));
+
+      bindEarthVAO(bufPatch);
+      gl.uniform1f(gl.getUniformLocation(progEarth, "uBase")!, B.PATCH);
+      gl.uniform1f(gl.getUniformLocation(progEarth, "uIsPatch")!, 1);
+      gl.uniform1f(gl.getUniformLocation(progEarth, "uZoom")!, zoomE);
+      gl.drawArrays(gl.POINTS, 0, Math.floor(N_PATCH * drawFrac));
 
       // Airplane / trail (after loop start)
       let planeVisible = 0;
@@ -720,10 +727,10 @@ export default function Scene({
         gl.uniform1f(gl.getUniformLocation(progPlane, "uPitch")!, skyPitch);
         gl.uniform1f(gl.getUniformLocation(progPlane, "uVFOV")!, (skyVFOV * Math.PI) / 180);
         gl.uniform1f(gl.getUniformLocation(progPlane, "uAspect")!, aspect);
-        gl.uniform1f(gl.getUniformLocation(progPlane, "uBScale")!, bScale);
+        gl.uniform1f(gl.getUniformLocation(progPlane, "uBScale")!, bScaleEff);
         gl.uniform1f(gl.getUniformLocation(progPlane, "uBase")!, B.PLANE);
         gl.uniform1f(gl.getUniformLocation(progPlane, "uVisible")!, 1);
-        gl.drawArrays(gl.POINTS, 0, N_PLANE);
+        gl.drawArrays(gl.POINTS, 0, Math.floor(N_PLANE * drawFrac));
 
         const tau = 9 * (1 + 1.2 * scrollNorm);
         const maxAge = 14 * (1 + 1.0 * scrollNorm);
@@ -741,18 +748,18 @@ export default function Scene({
         gl.uniform1f(gl.getUniformLocation(progTrail, "uPitch")!, skyPitch);
         gl.uniform1f(gl.getUniformLocation(progTrail, "uVFOV")!, (skyVFOV * Math.PI) / 180);
         gl.uniform1f(gl.getUniformLocation(progTrail, "uAspect")!, aspect);
-        gl.uniform1f(gl.getUniformLocation(progTrail, "uBScale")!, bScale);
+        gl.uniform1f(gl.getUniformLocation(progTrail, "uBScale")!, bScaleEff);
         gl.uniform1f(gl.getUniformLocation(progTrail, "uBase")!, B.TRAIL);
         gl.uniform1f(gl.getUniformLocation(progTrail, "uVisible")!, 1);
-        gl.drawArrays(gl.POINTS, 0, N_TRAIL);
+        gl.drawArrays(gl.POINTS, 0, Math.floor(N_TRAIL * drawFrac));
       }
 
       // ── Read back + reduce + emit text ──────────────────────────────────
       gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-      if (useFloat16 && ReadBuffers.float) {
-        gl.readPixels(0, 0, RW, RH, gl.RGBA, gl.FLOAT, ReadBuffers.float as Float32Array);
-      } else if (!useFloat16 && ReadBuffers.bytes) {
-        gl.readPixels(0, 0, RW, RH, gl.RGBA, gl.UNSIGNED_BYTE, ReadBuffers.bytes as Uint8Array);
+      if (useFloat16 && readFloat) {
+        gl.readPixels(0, 0, RW, RH, gl.RGBA, gl.FLOAT, readFloat);
+      } else if (!useFloat16 && readBytes) {
+        gl.readPixels(0, 0, RW, RH, gl.RGBA, gl.UNSIGNED_BYTE, readBytes);
       }
 
       const parts: string[] = new Array(ROWS);
@@ -769,8 +776,8 @@ export default function Scene({
               // readPixels origin bottom-left; cell row 0 = top of image
               const py = RH - 1 - (cy * SUB_Y + sy);
               const idx = (py * RW + px) * 4;
-              if (useFloat16 && ReadBuffers.float) sum += (ReadBuffers.float as Float32Array)[idx];
-              else if (ReadBuffers.bytes) sum += (ReadBuffers.bytes as Uint8Array)[idx] * normalize;
+              if (useFloat16 && readFloat) sum += readFloat[idx];
+              else if (readBytes) sum += readBytes[idx] * normalize;
             }
           }
           const mean = (sum / (SUB_X * SUB_Y)) * scaleRead;
@@ -804,17 +811,23 @@ export default function Scene({
         }
       }
 
-      if (reduceMotion) return; // 1 frame then stop
-      rafId = requestAnimationFrame(frame);
+      if (reduceMotion || tFreeze !== null) return; // 1 frame then stop
+      rafId = requestAnimationFrame(() => frame());
     };
-    rafId = requestAnimationFrame(frame);
+    rafId = requestAnimationFrame(() => frame());
 
-    // Also render once a frame after reduced-motion state changes.
-    const observerCleanup = () => {};
+    // Expose §B inspection hook: synchronous render at t, returns pre.textContent.
+    const win = window as unknown as { heroRender?: (t: number) => string };
+    win.heroRender = (t: number) => {
+      frame(t);
+      return pre.textContent ?? "";
+    };
+    const observerCleanup = () => { delete win.heroRender; };
 
     return () => {
       if (rafId) cancelAnimationFrame(rafId);
       window.removeEventListener("scroll", updateScroll);
+      window.removeEventListener("resize", onWinResize);
       mm.removeEventListener?.("change", onRM);
       document.removeEventListener("visibilitychange", onVis);
       ro.disconnect();
@@ -827,12 +840,10 @@ export default function Scene({
       gl.deleteBuffer(bufEarth);
       gl.deleteBuffer(bufPatch);
       gl.deleteBuffer(bufStars);
-      gl.deleteBuffer(bufHaze);
       gl.deleteBuffer(bufPlane);
       gl.deleteBuffer(bufTrail);
       gl.deleteProgram(progEarth);
       gl.deleteProgram(progStars);
-      gl.deleteProgram(progHaze);
       gl.deleteProgram(progPlane);
       gl.deleteProgram(progTrail);
       const ext = gl.getExtension("WEBGL_lose_context");

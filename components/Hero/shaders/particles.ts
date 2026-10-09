@@ -94,6 +94,8 @@ export const earthVert = /* glsl */ `#version 300 es
   uniform float uLook;      // 0..1 (horizon drops → look up)
   uniform float uHorizonY;  // normalized screen y of horizon (−top..+top)
   uniform float uTop;       // RH / RW (half-height in sphere units)
+  uniform float uT;         // raw seconds (for per-particle delay + haze drift)
+  uniform float uBHaze;     // B_HAZE for mix target
 
   uniform sampler2D uLandMask;
 
@@ -145,26 +147,39 @@ export const earthVert = /* glsl */ `#version 300 es
       return;
     }
 
-    // Lift: surface particles leave for haze. We cut them out of scene A once
-    // lift starts, so the haze layer will carry them instead.
-    if (uLift > 0.001) {
-      // staggered per-particle lift
-      float w = uLift * (1.0 - 0.4 * aR); // some leave earlier
-      B *= max(0.0, 1.0 - w);
-    }
-
-    // Pinhole project.
+    // Sphere-projected NDC (base position before any lift).
     float denom = max(uDist - p.z, 1e-3);
     float nx = (p.x / denom) * uF;
     float ny = (p.y / denom) * uF;
-    // In NDC: aspect so that y uses uTop limits → ny already in sphere units
-    // where screen half-height is uTop. Convert to NDC: ndc_y = ny / uTop.
-    float ndcX = nx; // already in x-sphere units [−1..1] matches NDC x
-    float ndcY = ny / uTop;
+    float sphereNdcX = nx;
+    float sphereNdcY = ny / uTop;
+
+    // §C surface → haze transition: per-particle delay r·0.8s, duration 1.6s.
+    // Clamped eased w_i; valid only once lift period has started (uT > 6.8).
+    float dT = (uT - 6.8 - aR * 0.8) / 1.6;
+    float wT = clamp(dT, 0.0, 1.0);
+    // easeIO inlined (cubic in-out)
+    float w_i = wT < 0.5 ? 4.0 * wT * wT * wT : 1.0 - pow(-2.0 * wT + 2.0, 3.0) / 2.0;
+    // Scale by uLift so pre-6.8s guard still holds (uLift grows from 0 at t=6.8).
+    w_i *= clamp(uLift * 2.0, 0.0, 1.0);
+
+    // Haze target position (same formula as haze layer, derived from aR).
+    // Use aR as both x- and y-seed (jittered via mantissa hash).
+    float r2 = fract(aR * 7.919 + 0.21);
+    float xH = fract(aR + 0.012 * uT * (0.5 + aR)) * 2.0 - 1.0;
+    float yFrac = -log(max(1.0 - r2 * (1.0 - exp(-1.0 / 0.16)), 1e-5)) * 0.16;
+    float yH = uHorizonY + yFrac * (1.0 - uHorizonY);
+    yH += 0.02 * sin(uT * 0.8 + aR * 6.28);
+
+    float ndcX = mix(sphereNdcX, xH, w_i);
+    float ndcY = mix(sphereNdcY, yH, w_i);
+
+    // Brightness blended toward haze.
+    float Bout = mix(max(B, 0.0), uBHaze * (0.5 + 0.5 * aR), w_i);
 
     gl_Position = vec4(ndcX, ndcY, 0.0, 1.0);
     gl_PointSize = 1.0;
-    vB = max(B, 0.0) * uBScale;
+    vB = Bout * uBScale;
   }
 `;
 
@@ -186,10 +201,11 @@ export const starsVert = /* glsl */ `#version 300 es
   uniform float uFade; // 1 → 0 across 1.0–2.2s
   uniform float uBScale;
   uniform float uBase;
+  uniform float uShiftX; // NDC offset for second-pixel draw (= 2/RW)
   out float vB;
   void main() {
     vB = uBase * (0.5 + 0.5 * aR) * uFade * uBScale;
-    gl_Position = vec4(aPos, 0.0, 1.0);
+    gl_Position = vec4(aPos.x + uShiftX, aPos.y, 0.0, 1.0);
     gl_PointSize = 1.0;
   }
 `;
