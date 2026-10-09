@@ -1,9 +1,9 @@
-# 40 — 홈 히어로: SAR 방식 ASCII 명세 (40d-003 재정의)
+# 40 — 홈 히어로: SAR 방식 ASCII 명세 (40d-003 재정의 · 40d-004 리뷰 반영)
 
-- 작성: designer w9:p1 · 브랜치 `feature/design` · 2026-10-10
+- 작성: designer w9:p1 · 브랜치 `feature/design` · 2026-10-10 (004: 리뷰 003 R1·R2·P3 반영)
 - **이 문서가 히어로의 단일 기준.** 이전 셀 셰이더 명세(v3)는 `docs/design/archive/40-hero-v3-cellshader.md`에 보관했다(리서치·폰트 실측은 여기서 재사용).
 - 기준 레퍼런스: 사용자가 만든 `~/Downloads/sar-motion-reference/` (README 3·5·7장, `ascii-sar.html`, `ascii-minimal.html`, `keyframes.png`). **톤과 입자 밀도가 이 수준이어야 한다.**
-- 목업(이 명세 수치를 CPU로 실행): `agent-ops/luckyzz/handoff/40d-assets/mock-sar-earth.png`, `mock-sar-plane.png`, 시점별 `sar/mock-sar-*.{png,txt}`. `.txt`는 `<pre>`에 그대로 들어갈 문자열이다.
+- 목업(이 명세 수치를 CPU로 실행): `agent-ops/luckyzz/handoff/40d-assets/mock-sar-earth.png`(0.5s), `mock-sar-closeup.png`(5.5s), `mock-sar-plane.png`(21.76s), 8비트 폴백 비교 `sar/mock-sar-desktop-t05.50-u8.*`, 시점별 `sar/mock-sar-*.{png,txt}`. `.txt`는 `<pre>`에 그대로 들어갈 문자열이다.
 - 소스 후보: `public/references/40/sources/` (gitignore, 로컬) = `handoff/40d-assets/sources/`. 목록 §E.
 
 ## 0. 왜 바꾸나
@@ -19,14 +19,20 @@
 ## §A. 파이프라인
 
 ```
-1. 밝기 필드   WebGL2: 입자를 POINTS로 오프스크린 RW×RH 캔버스에 가산 혼합(blendFunc ONE, ONE)
-               (CPU 폴백: 같은 입자를 Float32Array에 누적 — ascii-minimal 구조)
-2. 읽기        gl.readPixels(0, 0, RW, RH)  — 원점 왼쪽 아래 주의
+1. 밝기 필드   WebGL2: 입자를 POINTS(gl_PointSize = 1.0)로 오프스크린 RW×RH 렌더 타깃에 가산 혼합(blendFunc ONE, ONE)
+               렌더 타깃 형식은 아래 1a/1b. (CPU 폴백: 같은 입자를 Float32Array에 누적 — ascii-minimal 구조)
+2. 읽기        gl.readPixels(0, 0, RW, RH, …)  — 원점 왼쪽 아래 주의. 형식은 1a/1b
 3. 셀 다운샘플 셀 하나 = SUB_X × SUB_Y 픽셀(4 × 8)의 **평균** (최댓값 금지)
 4. 감마·대비   v = pow(min(1, mean × GAIN), GAMMA)
 5. 램프        RAMP[min(len−1, floor(v × len))]
 6. 출력        <pre>.textContent = 전체 문자열 (행마다 "\n"). DOM은 <pre> 하나
 ```
+
+**1a. 렌더 타깃 (기본)** — `RGBA16F` 텍스처 + framebuffer. `gl.getExtension("EXT_color_buffer_float")`가 필요하다. 읽기는 `gl.readPixels(0, 0, RW, RH, gl.RGBA, gl.FLOAT, Float32Array)`. 입자 B가 1보다 커도(§C) **픽셀에서 잘리지 않는다**. CPU 목업(`mock_sar.py` 기본 `f16`)과 같은 결과.
+
+**1b. 확장 미지원 폴백** — 기본 8비트 `RGBA8` 캔버스. **모든 `B_*`를 ÷ 4**로 셰이더에 넘기고, JS의 셀 평균 단계에서 **GAIN × 4**(= 3.4)를 쓴다. 8비트는 픽셀마다 1.0에서 잘리므로, ÷ 4로 여유를 4배 만든다. 목업 `u8` 모드로 비교하면 float 대비 바뀐 셀은 근접 7.6%, 그 밖 ≤ 1.5%이고, 거의 모두 ±1단계다(`cmp_fmt.py`). **÷ 4 없이 8비트를 쓰면 안 된다**(근접 하이라이트가 사라짐, 리뷰 003 R2).
+
+**1c. 점 크기** — `gl_PointSize = 1.0`(uniform `uPx = 1.0`, 필드 해상도 고정이라 DPR과 무관). 별만 **가로로 이웃한 점 2개**(x와 x + 1px)로 찍는다(§C).
 
 - 필드 픽셀은 물리 공간에서 정사각이다: 셀 = 가로 1 : 세로 2이고 SUB = 4 × 8. 좌표계는 x ∈ [−1, 1](가로), y는 같은 단위(위 = +), 세로 반폭 = `RH/RW`.
 - 모든 레이어는 `render(t)` 하나 안에서 계산한다. 이전 프레임을 누적하지 않는다. 난수는 `mulberry32(20261010)`로 로드 때 한 번만 만든다.
@@ -42,23 +48,24 @@
 | 10.0 → | 비행 | 빈 하늘, 아래쪽 안개, 45초마다 비행기 1대가 28초 동안 통과하며 비운이 늘어짐 | `tp = (t−10) mod 45`, `tp < 28`이면 `k = tp/28`, `plane` + `trail` |
 
 - **이징은 두 가지만**: `easeIO`(부드러운 전개, cubic in-out)와 `expoOut`(탁 닫힘. 지금은 쓰는 곳 없음, 남겨 둠). SAR 원칙 3.
+- **이징 입력은 항상 [0, 1]로 클램프**한다(`x = clamp(x, 0, 1)` 후 계산, SAR `sat()`). 클램프하지 않으면 예를 들어 `1 − easeIO((age − 11)/3)`가 age < 11에서 1을 넘어 비운이 밝아진다.
 - 비행 구간은 루프이므로 `t`가 커져도 `(t−10) mod 45`로 이음매 없이 반복된다. 인트로(0–10s)는 페이지 로드 때 한 번만.
 - 스크롤: `k_eff = k + 0.25·s` (s = 히어로 스크롤 0–1, `s += (target − s)(1 − e^{−6dt})`), 비운 `τ × (1 + 1.2s)`, `maxAge × (1 + 1.0s)`. 비행기와 비운 **모두 `k_eff`**.
 - reduced-motion: `t = 21.76` 고정(k = 0.42) 한 장. `?t=8.2` 파라미터로 그 시점에 정지(검수용, SAR와 같음). `window.heroRender(t)`로 문자열 반환(캡처 테스트용).
-- v3에서 바뀐 것: 하강 끝 **1.12R → 1.6R**. 입자 방식에서 1.12R은 화면에 표면 3°만 보여 입자가 셀당 1개 미만이 되어 비어 보였다(목업 1차). 1.6R은 ≈14°가 보여 서울 패치와 맞는다.
+- v3에서 바뀐 것: 하강 끝 **1.12R → 1.6R**. 입자 방식에서 1.12R은 화면에 표면 3°만 보여 입자가 셀당 1개 미만이 되어 비어 보였다(목업 1차). 1.6R(가장 가까울 때 1.52R)에서 화면 모서리까지 보이는 지표는 **데스크톱 15.3° · 모바일 15.2° · 태블릿 10.2°**(`verify_sar.py`)다. 서울 패치는 반경 **20°**(밝기 100%는 17°까지)라 모든 bp에서 화면을 꽉 채운다.
 
 ## §C. 밝기 필드 레이어 (가산)
 
-입자 1개 밝기 = `B_*` × 조건. **셀 평균 ≈ (셀당 입자 수) × B / 32**를 목표 밝기(0.2–0.6)에 맞춘다. 입자 수를 바꾸면 B도 같이 바꾼다(SAR README 5장).
+입자 1개 밝기 = `B_*` × 조건. **셀 평균 ≈ (셀당 입자 수) × B / 32**를 목표에 맞춘다: **바다·안개 0.05–0.2, 빛 받는 육지 0.3–0.9, 비행기 중심 ≥ 1**. 이러면 램프 16단계를 전부 쓴다(목업: 지구·근접 프레임의 비공백 셀 90퍼센타일 = 단계 10–11, 최대 15). 입자 수를 바꾸면 B도 같이 바꾼다(SAR README 5장).
 
 | 레이어 | 입자 수 | 배치 (로드 때 1회) | 밝기 B | 움직임 (t의 함수) |
 |---|---|---|---|---|
-| `earth` 전역 | **140,000** | 단위 구 균등 | `B_EARTH 0.62 × (0.18 + 0.82·land) × (0.25 + 0.75·light) × (0.6 + 0.4·r) × (0.15 + 0.85·n·v)` | `wob = 0.004·sin(9u.y + 0.9t + 6.28r)`, 반지름 지터 ±0.006 |
-| `patch` 서울 | **120,000** | 서울 중심 반경 14° 원판 | 위 식, `B_PATCH 1.10` | 같음. LOD 가중 `zoom = easeIO((t−2.4)/2)`: 전역 × (1−zoom), 패치 × zoom |
-| `stars` | **140** | 화면 균등 | `B_STAR 2.2 × (0.5 + 0.5r)`, 가로 2px | 1.0–2.2s에 사라짐 |
-| `haze` 하늘 | **70,000** | x 균등, 지평선에서의 높이 `y = −ln(1 − u(1 − e^{−1/0.16}))·0.16` (화면 높이 비율, 지평선 쪽이 빽빽함) | `B_HAZE 0.09 × (0.5 + 0.5r) × lift` | 드리프트 `x += 0.012·t·(0.5 + r)` (2.4 주기로 감김), `y` 사인 흔들림 0.02 |
-| `plane` | **6,000** | planform 다각형 안 균등 | `B_PLANE 0.07` | world 경로 `P(k_eff)` |
-| `trail` | **40,000** | 각 입자 `age = r·14s`, 좌/우 줄 | `B_TRAIL 0.06 × e^{−age/τ} × (1 − easeIO((age − 11)/3))` | 아래 공식 |
+| `earth` 전역 | **140,000** | 단위 구 균등 | `B_EARTH 1.35 × (0.18 + 0.82·land) × (0.25 + 0.75·light) × (0.6 + 0.4·r) × (0.15 + 0.85·n·v)` | `wob = 0.004·sin(9u.y + 0.9t + 6.28r)`, 반지름 지터 ±0.006 |
+| `patch` 서울 | **160,000** | 서울 중심 반경 **`PATCH_DEG` 20°** 원판(넓이 균등: 반경 비율 `a = √u`) | 위 식, `B_PATCH 3.30` × 가장자리 감쇠 `1 − easeIO((a − 0.85)/0.15)` (바깥 15%만 부드럽게 줄어듦) | 같음. LOD 가중 `zoom = easeIO((t−2.4)/2)`: **전역 × (1 − 0.85·zoom)**(15% 잔류 — 패치 바깥이 검게 끊기지 않음), 패치 × zoom |
+| `stars` | **70** (셀의 ≈0.9%) | 화면 균등 | `B_STAR 2.6 × (0.5 + 0.5r)`, 가로로 점 2개 | 1.0–2.2s에 사라짐 |
+| `haze` 하늘 | **70,000** | x 균등, 지평선에서의 높이 `y = −ln(1 − u(1 − e^{−1/0.16}))·0.16` (화면 높이 비율, 지평선 쪽이 빽빽함) | `B_HAZE 0.12 × (0.5 + 0.5r) × lift` | 드리프트 `x += 0.012·t·(0.5 + r)` (2.4 주기로 감김), `y` 사인 흔들림 0.02 |
+| `plane` | **6,000** | planform 다각형(`planform()` → `PF`) 안 균등 | `B_PLANE 0.14` | world 경로 `P(k_eff)` |
+| `trail` | **40,000** | 각 입자 `age = r·14s`, 좌/우 줄 | `B_TRAIL 0.09 × e^{−age/τ} × (1 − easeIO((age − 11)/3))` | 아래 공식 |
 
 **지구 공식**
 - `land` = 40c `earth-landmask-2048.png`(등장방형, 육지 = 1)를 입자의 위경도에서 샘플. `light = clamp((n·SUN + 0.2)/1.2)`, `SUN = normalize(−0.55, 0.45, 0.70)`(view 공간).
@@ -79,18 +86,18 @@
 | <640 (62) | (−0.12,0.72)→(1.12,0.28) | 37.5° | (−30.95,60,−71.02) / (21.28,60,−22.07) | 8.0 | 0.063 |
 
 - planform(단위 S): 동체 |lat| < 0.045, along −0.50…0.55 · 주익 앞전 `0.08 − |lat|·tan28°`, 시위 `0.16 − 0.10|lat|`, |lat| ≤ 0.5 · 수평미익 앞전 `−0.36 − |lat|·tan32°`, 시위 0.09, |lat| ≤ 0.18. 비율은 plane-01·05로 확인.
-- 비운 입자(SAR `addArc`과 같은 발상): `C = P(k_eff − age/28) − DIR·0.6S + SIDE·S·(±0.18 + 0.04·age + w(age)·g)`. `w(age) = w0·(1 + 2.5·age/τ)`, `g` = 표준정규(Box–Muller, 시드 고정), τ = 9, maxAge = 14, `age < k_eff·28`인 입자만. → 비행기 바로 뒤는 **실선**(폭 좁고 밝음), 나이 들수록 **섬유 → 그레인**(넓게 퍼지고 어두움). SAR 원칙 5.
+- 비운 입자(SAR `addArc`과 같은 발상): `C = P(k_eff − age/28) − DIR·0.6S + SIDE·S·(±(0.18 + 0.04·age) + w(age)·g)`. `w(age) = w0·(1 + 2.5·age/τ)`, `g` = 표준정규(Box–Muller, 시드 고정), τ = 9, maxAge = 14, `age < k_eff·28`인 입자만. → 비행기 바로 뒤는 **실선**(폭 좁고 밝음), 나이 들수록 **섬유 → 그레인**(넓게 퍼지고 어두움). SAR 원칙 5. 두 줄은 **나이 들수록 서로 벌어진다**(`±(0.18 + 0.04·age)`, 엔진 두 줄의 후류가 퍼지는 모양. plane-04 참고).
 
 ## §D. 소스 에셋 — 실제로 쓰는 것
 
 | 용도 | 파일 / 정의 | 라이선스 | 비고 |
 |---|---|---|---|
-| 지구 대륙 | `public/textures/earth-landmask-2048.png` (40c, 2048×1024 이진) | MIT (three.js `earth_specular_2048.jpg` 반전) | 이미 main에 있음. 입자 위경도에서 샘플 |
-| 비행기 | 코드 상수 `PLANFORM` (§C 다각형) | 자체 정의 | 이미지 없음 |
+| 지구 대륙 | **권장: Natural Earth 1:50m land 래스터** `handoff/40d-assets/landmask-ne-2048.png` (2048×1024, 4× 슈퍼샘플 후 평균, 62KB, `ne_raster.py`로 재생성) → 40c가 `public/textures/earth-landmask-2048.png`를 이것으로 교체 | **퍼블릭 도메인** (naturalearthdata.com 이용 약관: "All versions … are in the public domain") | 지금 main의 파일(three.js `earth_specular_2048.jpg` 반전)과 IoU 0.973 = 같은 지형. three.js 저장소의 MIT가 이 텍스처에도 적용된다는 근거를 확인하지 못해 교체를 권장한다(리뷰 003 P3-8). 목업은 NE 마스크로 렌더함 |
+| 비행기 | 코드의 planform 다각형(`planform()` → 샘플 점 `PF`, §C) | 자체 정의 | 이미지 없음 |
 | 글자 | PP Lettra Mono Regular (`/public/fonts`) | 사이트 보유 | §F 램프는 이 폰트에서 실측 |
 | 톤 기준 | `public/references/40/sources/earth-01…05`, `plane-01…05` | **모두 퍼블릭 도메인 아님** | 화면에 쓰지 않음. 목업을 이것과 나란히 놓고 톤을 맞춤 |
 
-cosmos 이미지를 텍스처로 직접 쓰지 않는 이유는 두 가지다. (1) 출처 조회 결과 전부 `isPublicDomain = false`이고 상품(IXXI, Displate)이나 작가 연작(ffforum)도 섞여 있다. (2) 지구 사진·그림은 정사영 원판이라 위경도로 감을 수 없다(등장방형이 아님). 그래서 **톤은 cosmos, 데이터는 MIT 마스크 + 입자**로 결합한다.
+cosmos 이미지를 텍스처로 직접 쓰지 않는 이유는 두 가지다. (1) 출처 조회 결과 전부 `isPublicDomain = false`이고 상품(IXXI, Displate)이나 작가 연작(ffforum)도 섞여 있다. (2) 지구 사진·그림은 정사영 원판이라 위경도로 감을 수 없다(등장방형이 아님). 그래서 **톤은 cosmos, 데이터는 퍼블릭 도메인 마스크 + 입자**로 결합한다.
 
 ## §E. cosmos 소스 수집
 
@@ -98,7 +105,7 @@ cosmos 이미지를 텍스처로 직접 쓰지 않는 이유는 두 가지다. (
 
 | 파일 | cosmos | 원 출처 | 왜 이것인가 | 쓰는 곳 |
 |---|---|---|---|---|
-| earth-01 | https://www.cosmos.so/e/361641615 | Pinterest — MONOCHROME 채널 아트워크 | 검은 바탕 점 지구. **SAR 입자 구와 가장 가까움**: 점 밀도 = 밝기, 대륙만 밝음 | 지구 레이어 목표 톤 (B_EARTH, 바다/육지 비 0.18:1) |
+| earth-01 | https://www.cosmos.so/e/361641615 | Pinterest — MONOCHROME 채널 아트워크 | 검은 바탕 점 지구. **SAR 입자 구와 가장 가까움**: 점 밀도 = 밝기, 가장자리 얇아짐. **단, 원본은 바다가 흰 점이고 대륙이 어두운 면이다 — 이 명세는 극성을 뒤집어 육지를 밝게 쓴다**(아래 메모) | 점 크기·밀도·테두리 톤 기준. 극성은 반대 |
 | earth-02 | https://www.cosmos.so/e/743004247 | Pinterest — IXXI 월아트 | 검은 바탕 점 세계지도. 대륙 윤곽 밀도 | 대륙 대비 기준 (텍스처로는 못 씀: 투영) |
 | earth-03 | https://www.cosmos.so/e/1998389454 | are.na block 10379750 | 격자 글리프 지구, 바다·육지 밀도 차 큼 | 대비 상한 |
 | earth-04 | https://www.cosmos.so/e/2120204430 | ffforum **TITLES** (2023) | **사용자 공유 이미지**, 오슬로 좌표 | 근접 장면의 거친 블록감·좌표 문법 |
@@ -109,6 +116,8 @@ cosmos 이미지를 텍스처로 직접 쓰지 않는 이유는 두 가지다. (
 | plane-04 | https://www.cosmos.so/e/65275324 | Pinterest (prasanth_x) | 어두운 하늘 + 밝은 비운 2줄 | 비운 밝기·감쇠 |
 | plane-05 | https://www.cosmos.so/e/35884707 | Displate 747 청사진 | 평면도·정면·측면 | 형상 비율 검증 |
 
+**극성 메모 (earth-01 · earth-04)**: 두 핀 모두 바다가 밝고(흰 점·체커) 대륙이 어둡다. 이 명세는 **육지를 밝게** 둔다. 이유는 두 가지다. (1) 입자 방식에서 밝기 = 밀도라, 바다를 밝게 하면 지구가 밝은 원판에 대륙 모양 구멍이 뚫린 그림이 되어 화면을 압도한다. 지구 넓이의 약 70%가 바다다. (2) 대상인 서울이 육지라, 근접 장면에서 한반도가 밝은 덩어리로 읽혀야 한다. 극성을 원본대로 할지는 **사용자 확인 사항**으로 handoff에 올린다(`(0.18 + 0.82·land)` → `(1 − 0.82·land)` 한 줄이면 뒤집힌다).
+
 검색 0건 또는 쓸 것 없음: `ascii airplane side`·`dot matrix plane`은 결과가 사진과 아이콘뿐이었다(ASCII 비행기 소스는 cosmos에 거의 없음). `tomorrow ascii`는 타이포 포스터 위주. → 비행기는 **입자 planform + 비운**으로 만들고, 소스는 형상·톤 기준으로만 쓴다.
 
 ## §F. 그리드 · 램프 · 감마
@@ -118,7 +127,7 @@ cosmos 이미지를 텍스처로 직접 쓰지 않는 이유는 두 가지다. (
 | `COLS` | **160** 데스크톱 · **120** 태블릿 · **80** 모바일 | SAR 160. README 권장 120–200은 데스크톱 기준이고, 390px 폭에서 120열이면 글자 3.3px로 회색 화면이 됨 |
 | `CELL_ASPECT` | **2.0** (세로 = 가로 × 2) | README 7장. 좌표 계산에 반영(§A 정사각 필드) |
 | `ROWS` | `round(H / (W/COLS·2))` → 1440×900: **50** · 1024×1366: 80 · 390×844: 87 | |
-| 필드 `RW × RH` | `COLS·4 × ROWS·8` → **640×400** · 480×640 · 320×696 | SAR 640×360과 같은 셀당 픽셀 |
+| 필드 `RW × RH` | `COLS·4 × ROWS·8` → **640×400** · 480×640 · 320×696 | 셀당 4 × 8px = 물리 공간 정사각(셀 1:2). SAR는 640×360 / 160×54 = 셀당 4 × 6.67px라 정사각이 아님 |
 | `fitText` | `font-size = 영역폭 / COLS / ratio`, `line-height = 영역높이 / ROWS`. Lettra `ratio`(M 폭/글자 크기) = **0.58** → 1440 기준 **15.5px / 18px** | SAR `fitText()`. 폰트 로드 후 다시 실행 |
 | `RAMP` | **`" .':;+*cvo%0OKBM"` (16)** | 아래 |
 | `GAIN`, `GAMMA` | **0.85, 0.70** | SAR 값 그대로 |
@@ -143,13 +152,15 @@ cosmos 이미지를 텍스처로 직접 쓰지 않는 이유는 두 가지다. (
 | `COLS`, `CELL_ASPECT`, `SUB_X/SUB_Y` | 해상도, 셀 비율, 셀당 필드 픽셀 |
 | `RAMP`, `GAIN`, `GAMMA` | 글자 단계, 대비 |
 | `N_EARTH`, `N_PATCH`, `N_HAZE`, `N_STAR`, `N_PLANE`, `N_TRAIL` | 입자 수. 줄이면 어두워지므로 `B_*`도 같이 올림 |
-| `B_EARTH`, `B_PATCH`, `B_STAR`, `B_HAZE`, `B_PLANE`, `B_TRAIL` | 입자 1개당 밝기 |
+| `B_EARTH`, `B_PATCH`, `B_STAR`, `B_HAZE`, `B_PLANE`, `B_TRAIL` | 입자 1개당 밝기 (float 타깃 기준. 8비트 폴백은 ÷ 4) |
+| `PATCH_DEG` | 서울 패치 반경 20°. 줄이면 근접 장면 모서리가 빔 |
+| `FMT` (`f16` / `u8`), `uPx` | 렌더 타깃 형식(§A 1a/1b), 점 크기 1.0 |
 | `globe_camera(t)` | 지구 중심 정렬·거리(6.4R → 1.6R)·초점 |
 | `easeIO((t − A) / D)` | 각 전환의 시작 A와 길이 D. 타이밍은 대부분 여기서 고침 |
 | `zoom` | 전역 → 서울 패치 LOD 전환 (2.4–4.4s) |
 | `lift`, `look`, `h_frac` | 하늘 전환 진행, 올려다보기, 지평선 높이 |
 | `haze_xy(t, ids)` | 하늘 안개 입자 위치(드리프트·지평선) |
-| `PLANE` (bp별 vfov·시작·끝·S), `PLANFORM` | 비행기 경로·크기·형상 |
+| `PLANE` (bp별 vfov·시작·끝·S), `planform()` / `PF` | 비행기 경로·크기·형상(다각형 안 샘플 점) |
 | `plane_layer(k)`, `tau`, `max_age`, `w0` | 비운 길이·감쇠·폭 |
 | `LOOP_T0`, `PERIOD`, `PASS` | 비행 루프 시작 10s, 주기 45s, 통과 28s |
 
@@ -168,12 +179,14 @@ cosmos 이미지를 텍스처로 직접 쓰지 않는 이유는 두 가지다. (
 11. **cosmos 소스를 화면 에셋으로 쓰지 말 것** — 퍼블릭 도메인이 아님(§D).
 12. 지구를 1.6R보다 가깝게 하지 말 것 — 보이는 표면이 너무 좁아 입자가 셀당 1개 미만이 됨.
 13. 화면에 좌표 한 줄 외의 라벨·수식을 넣지 말 것.
+14. **8비트 렌더 타깃에 B를 그대로 넣지 말 것** — RGBA16F를 쓰거나, 8비트면 B ÷ 4 · GAIN × 4(§A 1b).
+15. **서울 패치를 화면 모서리 각도보다 좁게 하지 말 것**(`PATCH_DEG` ≥ 모서리 각도 + 여유. 지금 20° vs 모서리 15.3°), 전역 입자를 근접 장면에서 0으로 끄지 말 것(15% 잔류).
 
 ## 성능 · 폴백 · 접근성
 
 | 상태 | 동작 |
 |---|---|
-| 기본 | WebGL2 POINTS 약 37.6만 개 → 640×400 readPixels → 8,000자 문자열 (SAR와 같은 규모) |
+| 기본 | WebGL2 POINTS 약 41.6만 개 → 640×400 readPixels → 8,000자 문자열 (SAR와 같은 규모) |
 | 저사양 (평균 < 24fps 2초) | 1단계 입자 수 ½, `B_*` × 2 → 2단계 30fps로 제한 → 3단계 정적 프레임(`t = 21.76`의 문자열을 빌드 때 `.txt`로 구워 SSR) |
 | WebGL2 없음 | CPU 경로(ascii-minimal 구조, 입자 ¼, B × 4)로 30fps. 그것도 느리면 정적 문자열 |
 | SSR / JS 전 | 정적 문자열 `<pre>`를 바로 렌더(텍스트라 이미지보다 가벼움) + 좌표 |
@@ -186,10 +199,13 @@ cosmos 이미지를 텍스처로 직접 쓰지 않는 이유는 두 가지다. (
 ```
 A=/Users/illheon/agent-ops/luckyzz/handoff/40d-assets
 F=<워크트리>/public/fonts/PPLettraMono-Regular.otf
-python3 -I $A/mock_sar.py $F $A/landmask-2048.png <out> desktop 0.5,4.0,8.2,21.76
-python3 -I $A/mock_sar.py $F $A/landmask-2048.png <out> mobile 0.5,21.76
+python3 -I $A/mock_sar.py $F $A/landmask-ne-2048.png <out> desktop 0.5,4.0,5.5,8.2,21.76
+python3 -I $A/mock_sar.py $F $A/landmask-ne-2048.png <out> mobile 0.5,5.5,21.76
+python3 -I $A/mock_sar.py $F $A/landmask-ne-2048.png <out> desktop 5.5 u8       # §A 1b 8비트 폴백
 python3 -I $A/ramp_check.py $F  # §F 램프 실측: SAR 15단계 vs 16단계, Lettra Mono·Menlo
-python3 -I $A/verify.py $F      # 16단계 램프 커버리지 표, 경로·px/s, 좌표 대비
+python3 -I $A/verify_sar.py $F  # §F 그리드·fitText·램프, §C 패치가 덮는 각도, 경로·px/s, 좌표 대비(#000)
+python3 -I $A/verify_sar.py $F <out>/*.txt   # 프레임별 램프 단계 분포, 모서리·위아래 3줄 빈칸 비율
+python3 -I $A/cmp_fmt.py <out>/mock-sar-desktop-t05.50.txt   # float vs 8비트 폴백(같은 폴더에 -u8.txt 필요)
 python3 -I $A/path.py           # §C world 경로
 ```
 목업은 톤 확인용이다(maxdiff는 요구하지 않음). 난수는 numpy(PCG64, 시드 20261010)라 JS의 mulberry32와 입자 배치는 다르고, 밀도·밝기·타이밍만 같다.
