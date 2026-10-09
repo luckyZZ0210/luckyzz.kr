@@ -1,373 +1,211 @@
-# 40 — 홈 히어로: ASCII 재명세 (40d)
+# 40 — 홈 히어로: SAR 방식 ASCII 명세 (40d-003 재정의 · 40d-004 리뷰 반영)
 
-- 작성: designer w9:p1 · 브랜치 `feature/design` · 2026-10-09
-- 대상 구현: `components/Hero/Scene.tsx`, `components/Hero/shaders/dither.ts` → **`shaders/ascii.ts`로 교체** (현재 기준 커밋 `3961dc8`)
-- 레퍼런스: `public/references/40/` (목록·출처는 §8, `public/references/40/README.md`)
-- 목업: `public/references/40/09–12` — 이 문서의 수치를 그대로 CPU로 렌더한 결과(DPR 2로 렌더 → **LANCZOS로 CSS px 크기 축소**: 데스크톱 1440×900, 모바일 390×844). **구현 결과가 이 장들과 톤이 같아야 한다.** 재현: `agent-ops/luckyzz/handoff/40d-assets/mock.py` (명령은 handoff 40d-002)
-- Figma: 사용 안 함(목업은 위 CPU 렌더로 대체 — handoff 참고)
+- 작성: designer w9:p1 · 브랜치 `feature/design` · 2026-10-10 (004: 리뷰 003 R1·R2·P3 반영)
+- **이 문서가 히어로의 단일 기준.** 이전 셀 셰이더 명세(v3)는 `docs/design/archive/40-hero-v3-cellshader.md`에 보관했다(리서치·폰트 실측은 여기서 재사용).
+- 기준 레퍼런스: 사용자가 만든 `~/Downloads/sar-motion-reference/` (README 3·5·7장, `ascii-sar.html`, `ascii-minimal.html`, `keyframes.png`). **톤과 입자 밀도가 이 수준이어야 한다.**
+- 목업(이 명세 수치를 CPU로 실행): `agent-ops/luckyzz/handoff/40d-assets/mock-sar-earth.png`(0.5s), `mock-sar-closeup.png`(5.5s), `mock-sar-plane.png`(21.76s), 8비트 폴백 비교 `sar/mock-sar-desktop-t05.50-u8.*`, 시점별 `sar/mock-sar-*.{png,txt}`. `.txt`는 `<pre>`에 그대로 들어갈 문자열이다.
+- 소스 후보: `public/references/40/sources/` (gitignore, 로컬) = `handoff/40d-assets/sources/`. 목록 §E.
 
-## 0. 이 phase의 비주얼 질문 → 답
+## 0. 왜 바꾸나
 
-| 질문 | 답 (한 줄) |
+| 지금 (Scene.tsx, 셀 셰이더) | SAR 방식 |
 |---|---|
-| 디더 방식 | Bayer 픽셀 디더 폐기. **셀 단위 ASCII glyph** — 셀 1개 = 문자 1개, 밝기 → 12단계 ramp. 디더는 ramp 단계 사이에서만 셀 단위로. |
-| 톤 | **검은 바탕(#0B0B0B) + 따뜻한 회백색 글자(#E9E7E2)**. 밝은 것 = 글자 빽빽, 어두운 것 = 빈칸. 하늘은 대부분 비고, 지평선 쪽 안개·구름·비행기운만 글자로 찬다. |
-| 지구 | 셀 작게(7×12 CSS px), 콘트라스트 0.92로 낮춤, 대륙 마스크 + 지형 노이즈 + 글자 밝기 2채널(밀도+명도)로 "섬세". |
-| 비행기 | 땅(눈높이)에서 **55° 올려다봄**. 비행기는 고도에 놓인 실제 3D 평면도(planform)라 원근으로 아래에서 본 느낌이 생긴다. 한 번 지나가는 데 **28초**, 주기 **45초**, 화면 각도 **≈24°**(데스크톱). |
-| 모션감 | 전부 느리게: intro 6.8초, 구름 드리프트는 비행기 속도의 1/18, 글자 깜빡임 없음. |
+| 셀마다 셰이더가 어떤 글자를 쓸지 판단한다. 형태가 글자 단위로 설계됨 | **시간 t의 순수 함수로 밝기 필드 f(x,y,t)를 먼저 만들고**, 셀 평균 → GAIN → GAMMA → 램프. 글자는 **마지막 결과**일 뿐 |
+| 디테일을 늘리려면 셀 규칙을 더 짜야 함(윤곽·타일·플래그…) | 디테일 = 밝기 필드의 디테일. 입자 28만 개처럼 **점 밀도가 곧 밝기**라서 그레인·섬유·실선이 같은 장치에서 나옴 |
+| 출력 = WebGL 캔버스 | 출력 = **`<pre>`의 `textContent`** (텍스트라서 선택·복사되고, 폰트가 곧 사이트 폰트) |
 
 ---
 
-## 1. 셰이더 명세 — ASCII glyph atlas
-
-### 1.1 파이프라인
+## §A. 파이프라인
 
 ```
-pass 1  scene A (지구)  ─┐   렌더 타깃 크기 = (cols×2, rows×2), LinearFilter
-pass 1' scene B (하늘)  ─┤   ※ B는 intro 3.4s 이후부터, A는 4.4s 이후 렌더 중단
-                          ▼
-pass 2  ascii.frag : 셀 중심에서 A·B 샘플(2×2 평균) → 휘도 → 보정 → ramp index → atlas 샘플 → 화면
+1. 밝기 필드   WebGL2: 입자를 POINTS(gl_PointSize = 1.0)로 오프스크린 RW×RH 렌더 타깃에 가산 혼합(blendFunc ONE, ONE)
+               렌더 타깃 형식은 아래 1a/1b. (CPU 폴백: 같은 입자를 Float32Array에 누적 — ascii-minimal 구조)
+2. 읽기        gl.readPixels(0, 0, RW, RH, …)  — 원점 왼쪽 아래 주의. 형식은 1a/1b
+3. 셀 다운샘플 셀 하나 = SUB_X × SUB_Y 픽셀(4 × 8)의 **평균** (최댓값 금지)
+4. 감마·대비   v = pow(min(1, mean × GAIN), GAMMA)
+5. 램프        RAMP[min(len−1, floor(v × len))]
+6. 출력        <pre>.textContent = 전체 문자열 (행마다 "\n"). DOM은 <pre> 하나
 ```
 
-- 씬 타깃을 **셀 격자의 2배 해상도**로만 렌더한다(1440×900·셀 7×12 → 205×75 셀 → 410×150 타깃). 셀 중심 샘플 1회 = 2×2 평균. 풀해상도 렌더 금지(§7).
-- `renderer.toneMapping = THREE.NoToneMapping`, 씬 머티리얼은 전부 `ShaderMaterial` 또는 `MeshBasicMaterial` — **이 문서의 휘도 수치는 머티리얼이 출력하는 값 그대로**다. `MeshStandardMaterial` + 라이트 조합은 수치가 맞지 않으므로 지구는 커스텀 셰이더(§2.2)로 바꾼다.
-- 타깃 텍스처 `colorSpace = NoColorSpace`(선형 값 그대로). 감마는 ascii 패스의 `uGamma` 하나로만.
+**1a. 렌더 타깃 (기본)** — `RGBA16F` 텍스처 + framebuffer. `gl.getExtension("EXT_color_buffer_float")`가 필요하다. 읽기는 `gl.readPixels(0, 0, RW, RH, gl.RGBA, gl.FLOAT, Float32Array)`. 입자 B가 1보다 커도(§C) **픽셀에서 잘리지 않는다**. CPU 목업(`mock_sar.py` 기본 `f16`)과 같은 결과.
 
-### 1.2 Glyph set
+**1b. 확장 미지원 폴백** — 기본 8비트 `RGBA8` 캔버스. **모든 `B_*`를 ÷ 4**로 셰이더에 넘기고, JS의 셀 평균 단계에서 **GAIN × 4**(= 3.4)를 쓴다. 8비트는 픽셀마다 1.0에서 잘리므로, ÷ 4로 여유를 4배 만든다. 목업 `u8` 모드로 비교하면 float 대비 바뀐 셀은 근접 7.6%, 그 밖 ≤ 1.5%이고, 거의 모두 ±1단계다(`cmp_fmt.py`). **÷ 4 없이 8비트를 쓰면 안 된다**(근접 하이라이트가 사라짐, 리뷰 003 R2).
 
-| 항목 | 값 |
-|---|---|
-| ramp (빈 → 빽빽) | `" .,:;-=+*#%@"` — **12단계**, ASCII만 (폰트 커버리지 보장) |
-| 폰트 | PP Lettra Mono **Regular 400** (`/public/fonts/PPLettraMono-Regular.otf`, 이미 `lib/fonts.ts`에 로드됨). family 이름은 next/font가 해시하므로 `getComputedStyle(document.body).fontFamily` 첫 항목을 쓴다 |
-| 폰트 로딩 | atlas 생성 전 `await document.fonts.load(\`400 ${px}px ${family}\`)`. 실패 시 `ui-monospace, Menlo, monospace` |
-| atlas | `<canvas>` 가로 `12 × cellW_dev`, 세로 `cellH_dev`. 흰색 글자·투명 배경, 각 글자는 셀 가로 중앙, `textBaseline="middle"`, y = `cellH_dev × 0.54`. 폰트 크기 = `round(cellH_dev × 0.86)` |
-| atlas 텍스처 | `CanvasTexture`, `minFilter=magFilter=LinearFilter`, `generateMipmaps=false`, `flipY=false`(셰이더에서 y 처리) |
+**1c. 점 크기** — `gl_PointSize = 1.0`(uniform `uPx = 1.0`, 필드 해상도 고정이라 DPR과 무관). 별만 **가로로 이웃한 점 2개**(x와 x + 1px)로 찍는다(§C).
 
-### 1.3 셀 크기 (CSS px → device px)
+- 필드 픽셀은 물리 공간에서 정사각이다: 셀 = 가로 1 : 세로 2이고 SUB = 4 × 8. 좌표계는 x ∈ [−1, 1](가로), y는 같은 단위(위 = +), 세로 반폭 = `RH/RW`.
+- 모든 레이어는 `render(t)` 하나 안에서 계산한다. 이전 프레임을 누적하지 않는다. 난수는 `mulberry32(20261010)`로 로드 때 한 번만 만든다.
 
-| breakpoint | 셀 W×H (CSS px) | 1440×900 기준 격자 | 지구 지름(셀) |
+## §B. 시간 비트 (`BEATS`)
+
+| t (s) | 이름 | 화면 | 하는 일 (§C 이름) |
 |---|---|---|---|
-| ≥ 1024 | **7 × 12** | 205 × 75 | ≈ 80 |
-| 640–1023 | **7 × 12** | 1024×1366 → 146 × 113 | ≈ 117 |
-| < 640 | **6 × 10** | 390×844 → 65 × 84 | ≈ 52 (지름 312px = 가로 80%) |
+| 0.0 – 1.0 | 정적 | 검은 하늘에 점 지구(지름 = `min(0.63H, 0.80W)`), 서울은 중심의 오른쪽 위, 별 | `earth` 전역 입자, `wob` 숨쉬기, `stars` |
+| 1.0 – 3.8 | 정렬·하강 | 서울이 중앙으로 오면서 다가감 | `globe_camera`: 중심 `easeIO(t/3.8)`, 거리 **6.4R → 1.6R** `easeIO((t−1)/2.8)`. 1.0–2.2 별 사라짐. 2.4–4.4 전역 입자 → **서울 패치 입자**(LOD) |
+| 3.8 – 6.8 | 근접 | 한반도 상공 클로즈업, 아주 느린 접근(−0.08R) | `patch` 입자만, 대륙은 밀도로 |
+| 6.8 – 10.0 | 하늘 전환 | 표면 입자가 **입자별 지연**을 두고 떠올라 하늘 안개가 되고, 지평선이 화면 가운데(0.50)에서 아래 밖(−0.12)으로 내려감 = 올려다봄 | `lift = easeIO((t−6.8)/3.2)`, 입자별 `w = easeIO((t − 6.8 − r·0.8)/1.6)`, `look = easeIO((t−7.4)/2.6)` |
+| 10.0 → | 비행 | 빈 하늘, 아래쪽 안개, 45초마다 비행기 1대가 28초 동안 통과하며 비운이 늘어짐 | `tp = (t−10) mod 45`, `tp < 28`이면 `k = tp/28`, `plane` + `trail` |
 
-- `uCellSize = vec2(round(cellW × dpr), round(cellH × dpr))` — **반드시 정수 device px**(소수면 격자가 아른거림).
-- DPR clamp: `min(devicePixelRatio, 2)`. ASCII 패스는 싸고 씬 타깃은 셀 격자 기준이라 기존 1.5 제한은 불필요. 저사양 강등 시 1 (§6).
-- 격자 원점: **화면 왼쪽 위**. 셰이더에서 `frag.y = uResolution.y - frag.y` 후 셀 계산(아래쪽 잘린 줄이 생기게 — 위쪽 잘림은 눈에 띔).
+- **이징은 두 가지만**: `easeIO`(부드러운 전개, cubic in-out)와 `expoOut`(탁 닫힘. 지금은 쓰는 곳 없음, 남겨 둠). SAR 원칙 3.
+- **이징 입력은 항상 [0, 1]로 클램프**한다(`x = clamp(x, 0, 1)` 후 계산, SAR `sat()`). 클램프하지 않으면 예를 들어 `1 − easeIO((age − 11)/3)`가 age < 11에서 1을 넘어 비운이 밝아진다.
+- 비행 구간은 루프이므로 `t`가 커져도 `(t−10) mod 45`로 이음매 없이 반복된다. 인트로(0–10s)는 페이지 로드 때 한 번만.
+- 스크롤: `k_eff = k + 0.25·s` (s = 히어로 스크롤 0–1, `s += (target − s)(1 − e^{−6dt})`), 비운 `τ × (1 + 1.2s)`, `maxAge × (1 + 1.0s)`. 비행기와 비운 **모두 `k_eff`**.
+- reduced-motion: `t = 21.76` 고정(k = 0.42) 한 장. `?t=8.2` 파라미터로 그 시점에 정지(검수용, SAR와 같음). `window.heroRender(t)`로 문자열 반환(캡처 테스트용).
+- v3에서 바뀐 것: 하강 끝 **1.12R → 1.6R**. 입자 방식에서 1.12R은 화면에 표면 3°만 보여 입자가 셀당 1개 미만이 되어 비어 보였다(목업 1차). 1.6R(가장 가까울 때 1.52R)에서 화면 모서리까지 보이는 지표는 **데스크톱 15.3° · 모바일 15.2° · 태블릿 10.2°**(`verify_sar.py`)다. 서울 패치는 반경 **20°**(밝기 100%는 17°까지)라 모든 bp에서 화면을 꽉 채운다.
 
-### 1.4 uniform 표 (`shaders/ascii.ts`)
+## §C. 밝기 필드 레이어 (가산)
 
-| uniform | 타입 | 값 | 설명 |
-|---|---|---|---|
-| `uSceneA` | sampler2D | 지구 타깃 | |
-| `uSceneB` | sampler2D | 하늘 타깃 | |
-| `uSceneMix` | float | 0→1 (§3) | A↔B 휘도 크로스페이드 |
-| `uAtlas` | sampler2D | atlas | |
-| `uGlyphCount` | float | **12.0** | ramp 길이 |
-| `uResolution` | vec2 | 캔버스 device px | |
-| `uCellSize` | vec2 | §1.3 | device px, 정수 |
-| `uBlack` | float | **0.06** | 이 아래 휘도 = 0 |
-| `uWhite` | float | **0.90** | 이 위 = 1 |
-| `uGamma` | float | **0.85** | <1 = 중간톤 들어올림(지구 디테일) |
-| `uContrast` | float | **0.92** | 0.5 기준. 1 미만 = 덜 투박 |
-| `uCut` | float | **0.035** | **보정 전** 정규화 휘도가 이 미만이면 무조건 빈칸 |
-| `uDither` | float | **0.50** | ramp 한 단계의 몇 배만큼 Bayer 4×4(셀 단위) 지터 |
-| `uIntensityFloor` | float | **0.40** | 글자 명도 = mix(0.40, 1, l). 밀도+명도 2채널 |
-| `uInk` | vec3 | **(0.914, 0.906, 0.886)** = #E9E7E2 | |
-| `uPaper` | vec3 | **(0.043, 0.043, 0.043)** = #0B0B0B | |
+입자 1개 밝기 = `B_*` × 조건. **셀 평균 ≈ (셀당 입자 수) × B / 32**를 목표에 맞춘다: **바다·안개 0.05–0.2, 빛 받는 육지 0.3–0.9, 비행기 중심 ≥ 1**. 이러면 램프 16단계를 전부 쓴다(목업: 지구·근접 프레임의 비공백 셀 90퍼센타일 = 단계 10–11, 최대 15). 입자 수를 바꾸면 B도 같이 바꾼다(SAR README 5장).
 
-### 1.5 ascii.frag (그대로 써도 되는 수준)
-
-```glsl
-precision highp float;
-varying vec2 vUv;
-uniform sampler2D uSceneA, uSceneB, uAtlas;
-uniform float uSceneMix, uGlyphCount, uBlack, uWhite, uGamma, uContrast, uCut, uDither, uIntensityFloor;
-uniform vec2 uResolution, uCellSize;
-uniform vec3 uInk, uPaper;
-
-float bayer4(vec2 p) {
-  vec2 q = mod(p, 4.0);
-  int i = int(q.y) * 4 + int(q.x);
-  // 0 8 2 10 / 12 4 14 6 / 3 11 1 9 / 15 7 13 5
-  float m[16];
-  m[0]=0.;m[1]=8.;m[2]=2.;m[3]=10.;m[4]=12.;m[5]=4.;m[6]=14.;m[7]=6.;
-  m[8]=3.;m[9]=11.;m[10]=1.;m[11]=9.;m[12]=15.;m[13]=7.;m[14]=13.;m[15]=5.;
-  for (int k = 0; k < 16; k++) if (k == i) return (m[k] + 0.5) / 16.0;
-  return 0.5;
-}
-
-void main() {
-  vec2 frag = vec2(vUv.x, 1.0 - vUv.y) * uResolution;      // 원점 = 왼쪽 위
-  vec2 cell = floor(frag / uCellSize);
-  vec2 grid = ceil(uResolution / uCellSize);
-  vec2 suv  = vec2((cell.x + 0.5) / grid.x, 1.0 - (cell.y + 0.5) / grid.y);
-
-  const vec3 W = vec3(0.2126, 0.7152, 0.0722);
-  float lum = mix(dot(texture2D(uSceneA, suv).rgb, W),
-                  dot(texture2D(uSceneB, suv).rgb, W), uSceneMix);
-
-  float raw = clamp((lum - uBlack) / (uWhite - uBlack), 0.0, 1.0);
-  float l   = clamp(0.5 + (pow(raw, uGamma) - 0.5) * uContrast, 0.0, 1.0);
-  float n1  = uGlyphCount - 1.0;
-  float ld  = clamp(l + (bayer4(cell) - 0.5) * uDither / n1, 0.0, 1.0);
-  float idx = raw < uCut ? 0.0 : floor(ld * n1 + 0.5);
-
-  vec2 inCell = fract(frag / uCellSize);
-  float g = texture2D(uAtlas, vec2((idx + inCell.x) / uGlyphCount, inCell.y)).a;
-  float inten = mix(uIntensityFloor, 1.0, l);
-  gl_FragColor = vec4(mix(uPaper, uInk, g * inten), 1.0);
-}
-```
-
-> 씬 타깃 크기는 `grid × 2`이므로 `suv`(셀 중심)는 2×2 텍셀의 정확한 꼭짓점 → LinearFilter가 자동으로 4-tap 평균을 준다.
-
----
-
-## 2. 지구 (scene A) — "섬세하게"
-
-### 2.1 지오메트리·배치
-
-| 항목 | 값 |
-|---|---|
-| 구 | `SphereGeometry(1, 128, 96)` |
-| 배경 | 휘도 0 (빈칸) + 별 |
-| 시작 방향 | 화면 중심 = **Seoul에서 경도 −18°, 위도 −12°** 지점 → 서울은 중심의 오른쪽 위에 보임 |
-| 정렬 | intro 0→3.8s 동안 회전이 `easeInOutSine`으로 **서울이 화면 정중앙**에 오도록 수렴 (자전 따로 없음, 최대 회전 속도 ≈ 9°/s — cubic은 17°/s로 너무 빠름) |
-| 서울 | 37.5665° N / 126.9780° E. 별도 마커 없음(좌표는 DOM 오버레이 §5가 담당) |
-
-### 2.2 지구 셰이더 (`earthFrag`, ShaderMaterial)
-
-| uniform | 값 | 비고 |
-|---|---|---|
-| `uLandMask` | equirect 2048×1024, 1채널, 육지=1 | **Natural Earth 1:50m land 래스터(퍼블릭 도메인)** — 에셋 추가는 engineering/40c 몫(`public/textures/earth-landmask-2048.png` 제안, ≤120KB) |
-| `uSunDir` | view space `normalize(-0.55, 0.45, 0.70)` | 왼쪽 위 앞에서 빛 → 오른쪽 아래에 터미네이터 |
-| `uWrap` | **0.20** | `diff = clamp((dot(n,L)+w)/(1+w),0,1)` — 부드러운 터미네이터 |
-| `uOceanAlbedo` | **0.36** | |
-| `uLandAlbedo` | **0.82** | 육지-바다 차 0.46 → ramp 5–6단계 차이 |
-| `uGrainFreq` | **48** | fbm 3옥타브, 입력 = equirect uv × 48 (구 표면에 고정 — 화면에 고정하지 말 것) |
-| `uGrainAmp` | 바다 **0.05**, 육지 **0.17** | `albedo += (fbm-0.5) × mix(0.05, 0.17, land)` — 지형 음영 대용 |
-| `uRimStrength` / `uRimPower` | **0.22** / **2.5** | `rim = 0.22 × (1-n·v)^2.5`, `diff`를 곱해 밤 쪽엔 없음 |
-| `uAmbient` | **0.03** | 밤 반구가 완전히 빈칸은 아니게 |
-
-`lum = albedo × diff + rim × diff + uAmbient`
-
-- 마스크는 `smoothstep(0.35, 0.68, mask)`로 해안선을 1–2셀에 걸쳐 부드럽게(계단 현상 방지).
-- 별: 배경 셀의 0.15%(`hash(halfcell) > 0.9985`), 휘도 0.55, 정적. intro 하강 단계에서 `1 - smoothstep(0, 0.5, descend)`로 사라짐.
-
----
-
-## 3. 카메라 · intro 명세
-
-### 3.1 타임라인 (prop `introDuration = 6.8`, 초)
-
-| t (s) | stage | scene | 카메라 | easing |
+| 레이어 | 입자 수 | 배치 (로드 때 1회) | 밝기 B | 움직임 (t의 함수) |
 |---|---|---|---|---|
-| 0.0 – 1.0 | **S0 hold** | A | 지구 중심에서 **6.4R**, vfov **`vS0`** (§3.1a), lookAt 중심 | 정지 (지구만 정렬 회전 중) |
-| 1.0 – 3.8 | **S1 descend** | A | 거리 **6.4R → 1.12R**, vfov **`vS0` → `vS1`** (§3.1a) | `easeInOutQuart` |
-| 3.4 – 4.4 | **X crossfade** | A→B | `uSceneMix` 0 → 1 | `smoothstep` |
-| 3.4 – 4.4 | (B 도착) | B | pitch **8°** 고정 — 지평선 띠가 화면 아래 1/3에 보임 | — |
-| 4.4 – 6.8 | **S2 look-up** | B | pitch **8° → 55°** | `easeInOutSine` |
-| 6.8 → | **S3 settle** | B | pitch 55° 고정 | — |
-| 6.8 – 7.4 | 좌표 페이드인 | DOM | opacity 0 → 1 | `ease-out`, 600ms |
-| 8.0 | 첫 비행기 | B | §4 | — |
+| `earth` 전역 | **140,000** | 단위 구 균등 | `B_EARTH 1.35 × (0.18 + 0.82·land) × (0.25 + 0.75·light) × (0.6 + 0.4·r) × (0.15 + 0.85·n·v)` | `wob = 0.004·sin(9u.y + 0.9t + 6.28r)`, 반지름 지터 ±0.006 |
+| `patch` 서울 | **160,000** | 서울 중심 반경 **`PATCH_DEG` 20°** 원판(넓이 균등: 반경 비율 `a = √u`) | 위 식, `B_PATCH 3.30` × 가장자리 감쇠 `1 − easeIO((a − 0.85)/0.15)` (바깥 15%만 부드럽게 줄어듦) | 같음. LOD 가중 `zoom = easeIO((t−2.4)/2)`: **전역 × (1 − 0.85·zoom)**(15% 잔류 — 패치 바깥이 검게 끊기지 않음), 패치 × zoom |
+| `stars` | **70** (셀의 ≈0.9%) | 화면 균등 | `B_STAR 2.6 × (0.5 + 0.5r)`, 가로로 점 2개 | 1.0–2.2s에 사라짐 |
+| `haze` 하늘 | **70,000** | x 균등, 지평선에서의 높이 `y = −ln(1 − u(1 − e^{−1/0.16}))·0.16` (화면 높이 비율, 지평선 쪽이 빽빽함) | `B_HAZE 0.12 × (0.5 + 0.5r) × lift` | 드리프트 `x += 0.012·t·(0.5 + r)` (2.4 주기로 감김), `y` 사인 흔들림 0.02 |
+| `plane` | **6,000** | planform 다각형(`planform()` → `PF`) 안 균등 | `B_PLANE 0.14` | world 경로 `P(k_eff)` |
+| `trail` | **40,000** | 각 입자 `age = r·14s`, 좌/우 줄 | `B_TRAIL 0.09 × e^{−age/τ} × (1 − easeIO((age − 11)/3))` | 아래 공식 |
 
-- 지구 6.4R·vfov 28°(데스크톱) → 지구 지름 ≈ 화면 높이의 63% (목업 09).
+**지구 공식**
+- `land` = 40c `earth-landmask-2048.png`(등장방형, 육지 = 1)를 입자의 위경도에서 샘플. `light = clamp((n·SUN + 0.2)/1.2)`, `SUN = normalize(−0.55, 0.45, 0.70)`(view 공간).
+- `(0.15 + 0.85·n·v)`: 균등 구를 투영하면 가장자리 화면 밀도가 1/cos로 몰려 테두리만 밝아진다. 이 항으로 상쇄하고 약한 테두리만 남긴다(SAR `dimZ`와 같은 역할).
+- 가장자리 얇아짐: `rim = 1 − n·v`, 입자 60%의 B × `(1 − 0.55·rim³)`.
+- 카메라: 핀홀 `x = X/(d − Z)·f`, `f = D_frac / tan(asin(1/6.4))` (`D_frac` = 지름/가로폭) → 6.4R에서 지름 = `min(0.63H, 0.80W)` (v3 §3.1a와 같은 규칙). 뒤 반구(`Z ≤ 0`)는 그리지 않음.
 
-#### 3.1a scene A vfov — breakpoint별 (three.js vfov는 **세로 기준**이라 세로로 긴 화면에서 한 값을 쓰면 지구가 가로를 넘친다)
+**하늘 전환 공식** (6.8–10s)
+- 표면(패치) 입자 중 앞면 입자 `i`가 안개 입자 `i mod N_HAZE`의 자리로 이동: `pos = mix(표면 투영, haze_xy(t), w_i)`, 밝기 `mix(B_i, B_HAZE, w_i)`.
+- 지평선 `h_frac = 0.50 − 0.62·look` (화면 아래에서의 높이 비율), `y_horizon = −top + 2·top·h_frac`, `top = RH/RW`. 지평선 아래(땅)는 비워 둔다.
 
-규칙: 지구 지름 **D = min(0.63·H, 0.80·W)** (거리 6.4R 고정, vfov로 맞춤).
+**비행기 · 비운 공식** (경로 수치는 v2·v3와 같고 `path.py`로 검증됨)
 
-```
-vS0 = 2·atan( H · tan(asin(1/6.4)) / D )        // tan(asin(1/6.4)) = 0.15826
-vS1 = 2·atan( 1.381 · tan(vS0 / 2) )            // 1.381 = tan19°/tan14° — 데스크톱 28°→38°와 같은 줌 비율
-```
-
-| breakpoint (기준 화면) | D | D / 가로 | `vS0` | `vS1` (S1 끝) | 목업 |
+| bp | 화면 시작 → 끝 | 각도 | world 시작 / 끝 (고도 60, pitch 55°) | 날개폭 S | 리본 w0 |
 |---|---|---|---|---|---|
-| ≥1024 (1440×900) | 567px | 39% | **28.2°** | **38.3°** | 09 |
-| 640–1023 (1024×1366) | 819px | 80% | **29.6°** | **40.0°** | — |
-| <640 (390×844) | 312px | 80% | **46.3°** | **61.2°** | 11 |
+| ≥1024 (vfov 55) | (−0.08,0.91)→(1.12,0.06) | 23.9° | (−100.94,60,−96.45) / (57.28,60,−11.00) | 12.0 | 0.042 |
+| 640–1023 (58) | (−0.10,0.80)→(1.10,0.22) | 32.8° | (−47.61,60,−80.78) / (30.00,60,−19.21) | 9.0 | 0.044 |
+| <640 (62) | (−0.12,0.72)→(1.12,0.28) | 37.5° | (−30.95,60,−71.02) / (21.28,60,−22.07) | 8.0 | 0.063 |
 
-- 표 값은 기준 화면 값이고, 구현은 resize마다 위 공식으로 다시 계산한다(어떤 화면비든 지구가 가로 80% 안에 들어감). 계산 검증: `handoff/40d-assets/path.py`.
-- 기존 4초·cubic은 "휙" 느낌이었음 → 6.8초, 시작/끝이 더 느린 Quart/Sine.
+- planform(단위 S): 동체 |lat| < 0.045, along −0.50…0.55 · 주익 앞전 `0.08 − |lat|·tan28°`, 시위 `0.16 − 0.10|lat|`, |lat| ≤ 0.5 · 수평미익 앞전 `−0.36 − |lat|·tan32°`, 시위 0.09, |lat| ≤ 0.18. 비율은 plane-01·05로 확인.
+- 비운 입자(SAR `addArc`과 같은 발상): `C = P(k_eff − age/28) − DIR·0.6S + SIDE·S·(±(0.18 + 0.04·age) + w(age)·g)`. `w(age) = w0·(1 + 2.5·age/τ)`, `g` = 표준정규(Box–Muller, 시드 고정), τ = 9, maxAge = 14, `age < k_eff·28`인 입자만. → 비행기 바로 뒤는 **실선**(폭 좁고 밝음), 나이 들수록 **섬유 → 그레인**(넓게 퍼지고 어두움). SAR 원칙 5. 두 줄은 **나이 들수록 서로 벌어진다**(`±(0.18 + 0.04·age)`, 엔진 두 줄의 후류가 퍼지는 모양. plane-04 참고).
 
-### 3.2 scene B (하늘) 카메라
+## §D. 소스 에셋 — 실제로 쓰는 것
 
-| 항목 | 데스크톱 ≥1024 | 태블릿 640–1023 | 모바일 <640 |
+| 용도 | 파일 / 정의 | 라이선스 | 비고 |
 |---|---|---|---|
-| 위치 | `(0, 0, 0)` — **눈높이, 땅 바로 위**(지면은 y<0, 그리지 않음 = 빈칸) | 같음 | 같음 |
-| yaw | 0 (−Z 방향) | 0 | 0 |
-| 최종 pitch | **55°** | 55° | 55° |
-| vfov | **55°** | **58°** | **62°** |
-| 화면 아래 끝 고도각 | 27.5° | 26° | 24° |
+| 지구 대륙 | **권장: Natural Earth 1:50m land 래스터** `handoff/40d-assets/landmask-ne-2048.png` (2048×1024, 4× 슈퍼샘플 후 평균, 62KB, `ne_raster.py`로 재생성) → 40c가 `public/textures/earth-landmask-2048.png`를 이것으로 교체 | **퍼블릭 도메인** (naturalearthdata.com 이용 약관: "All versions … are in the public domain") | 지금 main의 파일(three.js `earth_specular_2048.jpg` 반전)과 IoU 0.973 = 같은 지형. three.js 저장소의 MIT가 이 텍스처에도 적용된다는 근거를 확인하지 못해 교체를 권장한다(리뷰 003 P3-8). 목업은 NE 마스크로 렌더함 |
+| 비행기 | 코드의 planform 다각형(`planform()` → 샘플 점 `PF`, §C) | 자체 정의 | 이미지 없음 |
+| 글자 | PP Lettra Mono Regular (`/public/fonts`) | 사이트 보유 | §F 램프는 이 폰트에서 실측 |
+| 톤 기준 | `public/references/40/sources/earth-01…05`, `plane-01…05` | **모두 퍼블릭 도메인 아님** | 화면에 쓰지 않음. 목업을 이것과 나란히 놓고 톤을 맞춤 |
 
-### 3.3 하늘 휘도 (scene B 배경, 고도각 θ 기준)
+cosmos 이미지를 텍스처로 직접 쓰지 않는 이유는 두 가지다. (1) 출처 조회 결과 전부 `isPublicDomain = false`이고 상품(IXXI, Displate)이나 작가 연작(ffforum)도 섞여 있다. (2) 지구 사진·그림은 정사영 원판이라 위경도로 감을 수 없다(등장방형이 아님). 그래서 **톤은 cosmos, 데이터는 퍼블릭 도메인 마스크 + 입자**로 결합한다.
 
-| θ | 0° | 20° | 45° | 90° |
+## §E. cosmos 소스 수집
+
+- 방법: cosmos.so 공개 GraphQL `search(searchTerm)`로 검색한다. WebFetch로는 검색 결과가 비어 보인다(브라우저에서 나중에 로드됨). 쿼리: `dither planet` · `halftone globe black` · `dot world map` · `halftone world map` · `ascii airplane side` · `dot matrix plane` · `pixelated aircraft` · `airplane top view silhouette` · `airplane blueprint` · `tomorrow ascii` × 18 = 고유 **166개**. 썸네일 시트로 전부 검토 → 10개 선정. 원 출처·작성자·퍼블릭 도메인 여부는 `elementView` 쿼리로 확인. 앞선 리서치(266개, 보관본 §8)와 합치면 432개 중 선정.
+
+| 파일 | cosmos | 원 출처 | 왜 이것인가 | 쓰는 곳 |
 |---|---|---|---|---|
-| sky 휘도 | **0.20** | **0.11** | **0.05** | **0.00** |
+| earth-01 | https://www.cosmos.so/e/361641615 | Pinterest — MONOCHROME 채널 아트워크 | 검은 바탕 점 지구. **SAR 입자 구와 가장 가까움**: 점 밀도 = 밝기, 가장자리 얇아짐. **단, 원본은 바다가 흰 점이고 대륙이 어두운 면이다 — 이 명세는 극성을 뒤집어 육지를 밝게 쓴다**(아래 메모) | 점 크기·밀도·테두리 톤 기준. 극성은 반대 |
+| earth-02 | https://www.cosmos.so/e/743004247 | Pinterest — IXXI 월아트 | 검은 바탕 점 세계지도. 대륙 윤곽 밀도 | 대륙 대비 기준 (텍스처로는 못 씀: 투영) |
+| earth-03 | https://www.cosmos.so/e/1998389454 | are.na block 10379750 | 격자 글리프 지구, 바다·육지 밀도 차 큼 | 대비 상한 |
+| earth-04 | https://www.cosmos.so/e/2120204430 | ffforum **TITLES** (2023) | **사용자 공유 이미지**, 오슬로 좌표 | 근접 장면의 거친 블록감·좌표 문법 |
+| earth-05 | https://www.cosmos.so/e/302348461 | Pinterest (laninoe) | 아주 성긴 점 지구 | 밤 반구·가장자리 밝기 하한 |
+| plane-01 | https://www.cosmos.so/e/1788814443 | Pinterest (niananasae) | 검은 바탕 흰 여객기 평면도 | planform 비율 |
+| plane-02 | https://www.cosmos.so/e/653154702 | cosmos 업로드 | 위에서 본 실제 여객기 | 후퇴각·엔진 위치 |
+| plane-03 | https://www.cosmos.so/e/210167504 | Pinterest (viogyerko) | **아래서 올려다본** 작은 여객기, 빈 하늘 | 화면 속 기체 크기 |
+| plane-04 | https://www.cosmos.so/e/65275324 | Pinterest (prasanth_x) | 어두운 하늘 + 밝은 비운 2줄 | 비운 밝기·감쇠 |
+| plane-05 | https://www.cosmos.so/e/35884707 | Displate 747 청사진 | 평면도·정면·측면 | 형상 비율 검증 |
 
-- 선형 보간. θ<0(지면) = 0. → 천정은 완전히 비고, 화면 아래쪽에만 `.,` 안개.
-- 구름: 고도 y=60 평면 위 world xz 좌표에 fbm 3옥타브, 스케일 `(0.018, 0.030)`, `cloud = clamp((fbm-0.56)×3.0, 0, 1) × 0.22`. 드리프트 **(+0.35, 0, −0.12) u/s** (비행기의 약 1/18).
+**극성 메모 (earth-01 · earth-04)**: 두 핀 모두 바다가 밝고(흰 점·체커) 대륙이 어둡다. 이 명세는 **육지를 밝게** 둔다. 이유는 두 가지다. (1) 입자 방식에서 밝기 = 밀도라, 바다를 밝게 하면 지구가 밝은 원판에 대륙 모양 구멍이 뚫린 그림이 되어 화면을 압도한다. 지구 넓이의 약 70%가 바다다. (2) 대상인 서울이 육지라, 근접 장면에서 한반도가 밝은 덩어리로 읽혀야 한다. 극성을 원본대로 할지는 **사용자 확인 사항**으로 handoff에 올린다(`(0.18 + 0.82·land)` → `(1 − 0.82·land)` 한 줄이면 뒤집힌다).
 
----
+검색 0건 또는 쓸 것 없음: `ascii airplane side`·`dot matrix plane`은 결과가 사진과 아이콘뿐이었다(ASCII 비행기 소스는 cosmos에 거의 없음). `tomorrow ascii`는 타이포 포스터 위주. → 비행기는 **입자 planform + 비운**으로 만들고, 소스는 형상·톤 기준으로만 쓴다.
 
-## 4. 비행기 명세
+## §F. 그리드 · 램프 · 감마
 
-### 4.1 궤적 (world, scene B, 고도 y = 60)
-
-화면 비율 좌표는 `(x: 왼쪽=0, y: 위=0)`. world 좌표는 §3.2 카메라·최종 pitch 55° 기준으로 역투영해 계산한 값 — **world 직선을 그대로 쓰면 원근 때문에 화면 속도가 끝으로 갈수록 빨라지고 비행기도 커진다(= 아래서 올려다보는 느낌의 핵심).** 화면 공간 선형 트윈 금지.
-
-| breakpoint | 화면 시작 → 끝 | 화면 각도 | world 시작 | world 끝 | 길이 |
-|---|---|---|---|---|---|
-| ≥1024 (1440×900) | (−0.08, 0.91) → (1.12, 0.06) | **23.9°** | (−100.94, 60, −96.45) | (57.28, 60, −11.00) | 179.8 |
-| 640–1023 (1024×1366) | (−0.10, 0.80) → (1.10, 0.22) | **32.8°** | (−47.61, 60, −80.78) | (30.00, 60, −19.21) | 99.1 |
-| <640 (390×844) | (−0.12, 0.72) → (1.12, 0.28) | **37.5°** | (−30.95, 60, −71.02) | (21.28, 60, −22.07) | 71.6 |
-
-- 다른 화면비에서는 같은 화면 비율 시작/끝을 카메라에서 역투영해 y=60 평면과 교차시킨다(resize마다 재계산, 공식: `P = dir × 60 / dir.y`).
-- 위치: `P(k) = mix(start, end, k)`, `k = tPass / airplanePassDuration` **선형(world)**.
-
-### 4.2 타이밍
-
-| prop | 값 | 비고 |
+| 항목 | 값 | 근거 |
 |---|---|---|
-| `airplanePassDuration` | **28 s** | 화면 평균 ≈ 62 px/s(1440). 기존 10s 대비 2.8배 느림 |
-| `airplaneInterval` | **45 s** | 주기(시작→다음 시작). 비행기 없는 빈 하늘 17초 포함 — 비운이 다 사라질 시간 |
-| 첫 출현 | t = 8.0 s | intro 끝 후 1.2s |
+| `COLS` | **160** 데스크톱 · **120** 태블릿 · **80** 모바일 | SAR 160. README 권장 120–200은 데스크톱 기준이고, 390px 폭에서 120열이면 글자 3.3px로 회색 화면이 됨 |
+| `CELL_ASPECT` | **2.0** (세로 = 가로 × 2) | README 7장. 좌표 계산에 반영(§A 정사각 필드) |
+| `ROWS` | `round(H / (W/COLS·2))` → 1440×900: **50** · 1024×1366: 80 · 390×844: 87 | |
+| 필드 `RW × RH` | `COLS·4 × ROWS·8` → **640×400** · 480×640 · 320×696 | 셀당 4 × 8px = 물리 공간 정사각(셀 1:2). SAR는 640×360 / 160×54 = 셀당 4 × 6.67px라 정사각이 아님 |
+| `fitText` | `font-size = 영역폭 / COLS / ratio`, `line-height = 영역높이 / ROWS`. Lettra `ratio`(M 폭/글자 크기) = **0.58** → 1440 기준 **15.5px / 18px** | SAR `fitText()`. 폰트 로드 후 다시 실행 |
+| `RAMP` | **`" .':;+*cvo%0OKBM"` (16)** | 아래 |
+| `GAIN`, `GAMMA` | **0.85, 0.70** | SAR 값 그대로 |
+| 색 | 배경 **#000**, 글자 **#E9E7E2** 한 가지 | README "배경은 완전한 검정, 글자 한 가지 색". v3의 #0B0B0B에서 바꿈 |
 
-화면 위치 체크(데스크톱): k=0 → (−0.08, 0.91) · 0.25 → (0.10, 0.78) · 0.5 → (0.34, 0.62) · 0.75 → (0.66, 0.39) · 1 → (1.12, 0.06).
+**램프 선택 — SAR 램프를 이 폰트에서 실측함** (`ramp_check.py`, 셀 안 잉크 비율)
 
-### 4.3 메시 (planform, 아래에서 본 평면도)
+| 램프 | PP Lettra Mono | Menlo |
+|---|---|---|
+| SAR `" .`:;-~=+*xX#%@"` (15) | 역전 4개(`` ` ``<`.`, `-`·`~`<`;`, **`#` 0.71 < `X` 1.00**), 최대 단계 **0.37** (`*`→`x`) | 역전 5개, 최대 단계 0.18 — SF Mono·Menlo에서는 괜찮음 |
+| **`" .':;+*cvo%0OKBM"` (16)** | **단조, 최대 단계 0.138** | (Menlo에선 역전 있음) |
 
-`THREE.ShapeGeometry`를 XZ 평면에 눕혀(`rotateX(-π/2)`) 고도 60에 두고 `side: DoubleSide`. 진행 방향으로 yaw(`atan2(dir.x, −dir.z)`, 데스크톱 ≈ 118.4°). 단위 = 날개폭 S 배수, 앞 = +along.
+→ 사이트 폰트가 Lettra Mono이므로 **16단계 실측 램프**를 쓴다. 히어로만 `ui-monospace`로 바꾸면 SAR 램프를 그대로 쓸 수 있다(선택지, 사용자 결정).
 
-| 부위 | 형태 |
+**좌표 오버레이** — 사용자 요구라 유지한다. SAR 원칙("화면에 라벨을 넣지 않음")을 따라 **이것 하나만**: `<pre>` 밖 DOM 한 줄 `37.5665° N / 126.9780° E`, 왼쪽 아래 40 / 24px, 12 / 11px, `rgba(233,231,226,0.72)`, `tabular-nums`, t ≥ 10s에 600ms 페이드인. v3의 십자선·태그·표식은 넣지 않는다(필요하면 사용자 결정 후).
+
+## §G. 코드 지도 (이름 → 무엇이 바뀌나) — `mock_sar.py`와 구현이 같은 이름을 쓴다
+
+| 찾을 이름 | 의미 |
 |---|---|
-| 동체 | 폭 0.09S, along −0.50 … +0.55 |
-| 주익 | 앞전 `along = 0.08 − |lat|·tan28°`, 시위 `0.16 − 0.10|lat|`, lat ±0.50 |
-| 수평미익 | 앞전 `along = −0.36 − |lat|·tan32°`, 시위 0.09, lat ±0.18 |
-| 휘도 | **0.97** (`MeshBasicMaterial`, color 0.97) → `@%#` |
+| `BEATS` | 비트 이름·시간(§B). 타이밍 표시·검수용 |
+| `COLS`, `CELL_ASPECT`, `SUB_X/SUB_Y` | 해상도, 셀 비율, 셀당 필드 픽셀 |
+| `RAMP`, `GAIN`, `GAMMA` | 글자 단계, 대비 |
+| `N_EARTH`, `N_PATCH`, `N_HAZE`, `N_STAR`, `N_PLANE`, `N_TRAIL` | 입자 수. 줄이면 어두워지므로 `B_*`도 같이 올림 |
+| `B_EARTH`, `B_PATCH`, `B_STAR`, `B_HAZE`, `B_PLANE`, `B_TRAIL` | 입자 1개당 밝기 (float 타깃 기준. 8비트 폴백은 ÷ 4) |
+| `PATCH_DEG` | 서울 패치 반경 20°. 줄이면 근접 장면 모서리가 빔 |
+| `FMT` (`f16` / `u8`), `uPx` | 렌더 타깃 형식(§A 1a/1b), 점 크기 1.0 |
+| `globe_camera(t)` | 지구 중심 정렬·거리(6.4R → 1.6R)·초점 |
+| `easeIO((t − A) / D)` | 각 전환의 시작 A와 길이 D. 타이밍은 대부분 여기서 고침 |
+| `zoom` | 전역 → 서울 패치 LOD 전환 (2.4–4.4s) |
+| `lift`, `look`, `h_frac` | 하늘 전환 진행, 올려다보기, 지평선 높이 |
+| `haze_xy(t, ids)` | 하늘 안개 입자 위치(드리프트·지평선) |
+| `PLANE` (bp별 vfov·시작·끝·S), `planform()` / `PF` | 비행기 경로·크기·형상(다각형 안 샘플 점) |
+| `plane_layer(k)`, `tau`, `max_age`, `w0` | 비운 길이·감쇠·폭 |
+| `LOOP_T0`, `PERIOD`, `PASS` | 비행 루프 시작 10s, 주기 45s, 통과 28s |
 
-| breakpoint | 날개폭 S (world) | 화면 날개폭 (k=0 → 1) | 셀 수 |
-|---|---|---|---|
-| ≥1024 | **12.0** | 108 → 179 px | 15 → 26 |
-| 640–1023 | **9.0** | 114 → 162 px | 16 → 23 |
-| <640 | **7.0** | 53 → 71 px | 9 → 12 |
+## §H. 하지 말 것
 
-### 4.4 비행운 (contrail) — 리본 메시, 선(Line) 금지
+1. **글자를 직접 고르거나 배치하지 말 것.** 형태와 움직임은 전부 밝기 필드에서 나온다. 셀마다 글자 규칙(윤곽 글리프, 타일, 강제 글리프)을 짜는 셀 셰이더 방식은 폐기(보관본 참고).
+2. **70자짜리 긴 램프 금지.** 10–16단계. 그리고 **쓰는 폰트에서 실측**할 것(SAR 램프도 Lettra에서는 역전됨).
+3. **DOM 요소를 글자마다 만들지 말 것.** `<pre>` 하나의 `textContent`를 통째로 교체.
+4. **밝기→글자 변환을 셰이더 안에서 하지 말 것.** GPU는 밝기 필드까지만 만들고, 셀 평균·감마·램프는 readPixels 뒤 JS에서 한 다음 `pre.textContent`에 넣는다.
+5. **셀 평균 대신 최댓값 금지**(노이즈).
+6. **이전 프레임 누적 금지, `Math.random()` 금지.** t의 순수 함수 + `mulberry32(20261010)`.
+7. **셀 종횡비를 빼먹지 말 것** — 지구가 세로로 늘어난다.
+8. **입자 수만 줄이지 말 것** — `B_*`를 같이 올려야 한다.
+9. **입자를 한꺼번에 움직이지 말 것** — 전환에는 입자별 지연 `r·0.8`.
+10. **색·반전·속도 변경, 영상 재압축 금지**(SAR README 8장). 배경 #000, 글자 한 색.
+11. **cosmos 소스를 화면 에셋으로 쓰지 말 것** — 퍼블릭 도메인이 아님(§D).
+12. 지구를 1.6R보다 가깝게 하지 말 것 — 보이는 표면이 너무 좁아 입자가 셀당 1개 미만이 됨.
+13. 화면에 좌표 한 줄 외의 라벨·수식을 넣지 말 것.
+14. **8비트 렌더 타깃에 B를 그대로 넣지 말 것** — RGBA16F를 쓰거나, 8비트면 B ÷ 4 · GAIN × 4(§A 1b).
+15. **서울 패치를 화면 모서리 각도보다 좁게 하지 말 것**(`PATCH_DEG` ≥ 모서리 각도 + 여유. 지금 20° vs 모서리 15.3°), 전역 입자를 근접 장면에서 0으로 끄지 말 것(15% 잔류).
 
-| 항목 | 값 / 공식 |
-|---|---|
-| 개수 | 2줄, lat **±0.18S** |
-| 시작 | 비행기 중심 뒤 **0.6S** (꼬리 바로 뒤 간격) |
-| age 샘플 | `age_i = i × 0.25s`, i = 0…55 → **segments 56** (줄당) |
-| 위치 | `C_i = P(k − age_i / passDuration) − dir × 0.6S + side × (±0.18S + 0.04S × age_i)` — **비행기와 같은 P(k)에서 파생**(머리가 비행기에 붙어 다님) |
-| 반폭 | `w(age) = 0.030S × (1 + 2.5 × age / τ)` |
-| 휘도 | `0.85 × exp(−age / τ) × (1.0 − smoothstep(maxAge − 3, maxAge, age))` — GLSL `smoothstep`은 edge0 ≥ edge1이면 결과가 정의되지 않으므로 이 형태로 |
-| τ / maxAge | **9 s / 14 s** (기본). 화면상 길이 ≈ 14 × 62 px ≈ 870px (데스크톱) |
-| 최소 폭 | 화면에서 **≥ 1.5셀**(가까운 끝 기준). 미만이면 반폭 clamp |
-| k − age/T < 0 | 그 세그먼트 숨김 (출현 직후엔 짧게 자라남) |
-
-### 4.5 스크롤 "늘어짐" (기존 요구 유지, 완화)
-
-| 항목 | 값 |
-|---|---|
-| `scrollNorm` | `clamp(−rect.top / rect.height, 0, 1)` |
-| 스무딩 | `s += (target − s) × (1 − exp(−6·dt))` |
-| 비행기 scrub | `k_eff = k + 0.25 × s` |
-| 비운 늘어짐 | `τ × (1 + 1.2s)`, `maxAge × (1 + 1.0s)` |
-
----
-
-## 5. 좌표 오버레이
-
-> 디자인 안 투표 결과 기록을 ops 폴더에서 찾지 못함 → 아래는 **가정**(handoff에 명시). 투표 결과가 다르면 위치·크기만 바꾸면 된다.
-
-| 항목 | 값 |
-|---|---|
-| 요소 | 캔버스 밖 **DOM 텍스트**(SSR, 선택 가능), `aria-hidden` 아님 |
-| 텍스트 | `37.5665° N / 126.9780° E` (한 줄) |
-| 위치 | **왼쪽 아래**. 데스크톱 left 40px / bottom 40px · 모바일 left 24px / bottom `calc(24px + env(safe-area-inset-bottom))` — 비행기 진입점(왼쪽 아래)과는 비행기가 지나갈 때만 잠깐 겹침, 글자는 위에 그림(z-index) |
-| 폰트 | PP Lettra Mono Regular 400, `font-variant-numeric: tabular-nums` |
-| 크기 | 데스크톱 **12px**, 모바일 **11px**, line-height 1 |
-| letter-spacing | **0.08em** |
-| 색 | `rgba(233, 231, 226, 0.72)` (#E9E7E2 72%) on #0B0B0B → 대비 ≈ 8.4:1 |
-| 등장 | t 6.8 → 7.4s opacity 0→1. reduced-motion이면 처음부터 1 |
-
----
-
-## 6. 반응형 · 접근성 · 폴백
+## 성능 · 폴백 · 접근성
 
 | 상태 | 동작 |
 |---|---|
-| SSR / JS 전 | 히어로 컨테이너 `background:#0B0B0B` + 정적 폴백 이미지 + 좌표 DOM. **흰 화면 깜빡임 금지** |
-| `prefers-reduced-motion: reduce` | intro 생략, scene B·pitch 55°, 비행기 **k = 0.42** 정지 + 그 시점 비운, 구름 정지, 스크롤 반응 없음. 1프레임 렌더 후 rAF 정지(resize 때만 재렌더) |
-| WebGL 미지원 | 정적 폴백 이미지 |
-| 저사양 사전 판정 | `navigator.connection?.saveData` 또는 (`hardwareConcurrency ≤ 4` && `deviceMemory ≤ 4`) → 정적 폴백 |
-| FPS 워치독 | intro 시작 후 측정. 평균 < 24fps 2초 → **1단계 강등**(dpr 1, 셀 +1px) → 그래도 < 24fps 3초 → 정적 폴백 |
-| 정적 폴백 에셋 | 이 셰이더로 reduced-motion 상태를 캡처한 `hero-ascii-desktop.webp`(1440×900, ≤150KB) · `hero-ascii-mobile.webp`(780×1688, ≤120KB). 생성은 engineering/40c. 그 전까지 `10-mock-sky-plane.png` 톤 참고 |
-| 접근성 | 컨테이너 `role="img"` + `aria-label="서울 상공, 아래에서 올려다본 하늘을 비행기가 천천히 가로지르는 ASCII 애니메이션"`. canvas는 `aria-hidden` |
-| 탭 비활성 | `document.hidden`이면 rAF 정지, 복귀 시 시간 이어붙이기(비행기가 순간이동하지 않게 `tSec`를 일시정지 시간만큼 빼기) |
+| 기본 | WebGL2 POINTS 약 41.6만 개 → 640×400 readPixels → 8,000자 문자열 (SAR와 같은 규모) |
+| 저사양 (평균 < 24fps 2초) | 1단계 입자 수 ½, `B_*` × 2 → 2단계 30fps로 제한 → 3단계 정적 프레임(`t = 21.76`의 문자열을 빌드 때 `.txt`로 구워 SSR) |
+| WebGL2 없음 | CPU 경로(ascii-minimal 구조, 입자 ¼, B × 4)로 30fps. 그것도 느리면 정적 문자열 |
+| SSR / JS 전 | 정적 문자열 `<pre>`를 바로 렌더(텍스트라 이미지보다 가벼움) + 좌표 |
+| reduced-motion | `t = 21.76` 정지, rAF 없음, `matchMedia change` 반영 |
+| 접근성 | `<pre aria-hidden="true">`, 히어로에 `role="img"` + `aria-label="서울 상공, 아래에서 올려다본 하늘을 비행기가 천천히 가로지르는 ASCII 애니메이션"`. 좌표는 텍스트로 읽힘 |
+| 탭 비활성 | rAF 정지. 루프는 t의 순수 함수라 복귀하면 그대로 이어짐 |
 
----
+## 재현
 
-## 7. 하지 말 것
-
-1. **픽셀 단위 디더(Bayer/노이즈) 금지.** 디더는 셀 단위로 ramp 단계 사이에서만. 픽셀 디더 + 글자는 둘 다 뭉개진다.
-2. **콘트라스트로 검정을 들어올리지 말 것.** `uContrast < 1`을 0.5 기준으로 걸면 휘도 0이 0.04가 돼 하늘 전체가 `.` 격자(스크린 도어)로 덮인다 — 목업 1차에서 실제로 발생. 빈칸 판정은 **보정 전 raw**(`uCut`)로.
-3. **1px `THREE.Line` 비운 금지.** 셀 샘플링에서 사라졌다 나타났다 깜빡인다. 리본 ≥ 1.5셀 폭.
-4. **비운을 별도 타이머·지연 lerp로 따라가게 하지 말 것.** 머리가 비행기보다 뒤처져 보인다. 비운 = 같은 `P(k)`에서 age로 파생.
-5. **화면 공간 직선 트윈 금지.** 스티커가 미끄러지는 느낌. world 고도 평면 직선 + 원근 투영.
-6. **빠른 통과(<20s)·45° 이상 대각선 금지**(데스크톱). 사용자가 "사악" 느낌을 거절함.
-7. **셀 < 6 CSS px 금지**(글자로 안 읽히고 노이즈가 됨), **> 9 CSS px 금지**(투박해짐).
-8. **폰트 로드 전 atlas 생성 금지.** 대체 폰트 메트릭으로 굳는다.
-9. **소수 device px 셀 금지.** 스크롤·리사이즈 때 격자가 아른거림.
-10. **글자 랜덤 깜빡임·매 프레임 노이즈 금지.** 노이즈는 표면/world에 고정, 움직임은 구름 드리프트뿐.
-11. **지구 빠른 자전 금지**(정렬 회전 최대 ≈ 9°/s, 이후 정지).
-12. **별 과밀 금지**(0.15%).
-13. **좌표를 캔버스에 그리지 말 것**(SSR·선택·스크린리더 불가).
-14. **밝은 하늘 배경 금지.** 이전 버전(하늘 0.55–0.95)은 글자로 바꾸면 화면 전체가 `%@`로 꽉 찬다.
-15. **씬을 풀해상도로 렌더하지 말 것.** 셀 격자×2면 충분 — 그 이상은 성능 낭비 + 평균이 안 맞음.
-16. **종이·천공 질감 금지**(이전 결정 유지).
-
----
-
-## 8. 레퍼런스 (cosmos.so 중심)
-
-검색: cosmos.so 공개 GraphQL `search(searchTerm)` — 쿼리 `ascii dither earth`, `ascii globe`, `ascii airplane`, `ascii sky`, `dithered globe`, `halftone earth`, `ascii shader`, `ascii art`, `airplane from below`, `contrail sky` 결과 120개 중 8개 선별. 파일은 560px 썸네일(각 ≤ 360KB).
-
-| # | 파일 | 출처 | 좋은 점 | 다른 점 / 안 가져올 것 |
-|---|---|---|---|---|
-| 1 | `01-globe-dotmatrix.png` | https://www.cosmos.so/e/361641615 | 검은 바탕 점 격자 구 — 밀도+명도 2채널, 터미네이터가 부드러움. **"섬세함"의 기준** | 점이지 글자가 아님, 위경도 곡선 격자 |
-| 2 | `02-globe-ascii-circle.png` | https://www.cosmos.so/e/1536358668 | ASCII 지구, 지름 ≈ 70글자 — 우리 7×12 셀(지구 ≈ 80셀)과 비슷한 밀도 | 컬러(파랑·노랑), 원 테두리선 |
-| 3 | `03-globe-sparse-dots.png` | https://www.cosmos.so/e/302348461 | 낮은 콘트라스트, 밤 반구가 거의 비어 있는 절제 | 너무 희미해 대륙이 안 읽힘 — 우리는 육지 0.82로 더 밝게 |
-| 4 | `04-globe-glyph-land.png` | https://www.cosmos.so/e/1819360516 | 육지/바다를 다른 글자 밀도로 구분 | 파란 배경, 셀이 커서 투박 — **피할 예** |
-| 5 | `05-contrail-diagonal.png` | https://www.cosmos.so/e/1382769113 | 아래서 본 비운 2줄이 곧게 뻗는 대각선, 비행기는 점처럼 작음 | 사진, 밝은 하늘 |
-| 6 | `06-plane-high-small.png` | https://www.cosmos.so/e/2139042093 | 화면 아래 구름 띠 + 높고 작은 비행기 + 긴 비운 = 고도감·느림 | 사진. 각도 ≈ 25–30°로 우리 24°와 비슷 |
-| 7 | `07-halftone-clouds.png` | https://www.cosmos.so/e/1539350611 | 흑백 하프톤 구름 — 지평선 안개 톤 | 하프톤 점(우리는 글자), 너무 밝음 |
-| 8 | `08-ascii-ramp-on-black.png` | https://www.cosmos.so/e/680293491 | 검은 바탕 ASCII ramp `.:'"d@` 계열, 여백이 많은 구성 | 다른 문자셋(소문자 섞임) |
-| 9 | `09-mock-globe.png` | 자체 목업(이 명세 수치) | 데스크톱 S0 상태 톤 기준 | 목업 마스크 = three.js r160 `earth_specular_2048.jpg` 반전(임시). 실제는 Natural Earth |
-| 10 | `10-mock-sky-plane.png` | 자체 목업(이 명세 수치) | 데스크톱 S3 + 비행기 k=0.42(§4.1 경로) + 좌표 | 구름 노이즈는 CPU 근사 |
-| 11 | `11-mock-globe-mobile.png` | 자체 목업(이 명세 수치) | 모바일 S0 — 지구가 가로 80% 안 (§3.1a) | 같은 임시 마스크 |
-| 12 | `12-mock-sky-plane-mobile.png` | 자체 목업(이 명세 수치) | 모바일 S3 + k=0.42 + 좌표 | — |
-
-기술 레퍼런스: [react-postprocessing ASCII effect](https://react-postprocessing.docs.pmnd.rs/effects/ascii)(canvas atlas + 휘도→글자, 기본 셀 16px — 우리는 7), [vfx-js AsciiEffect](https://amagi.dev/vfx-js/docs/classes/_vfx-js_effects.AsciiEffect.html)(ramp 단계 사이 Bayer 디더 — §1.5와 같은 방식), [three.js forum: ASCII post-processing](https://discourse.threejs.org/t/asci-threejs-post-processing/89064).
-
----
-
-## 9. Scene.tsx 재튜닝 체크리스트 (engineering용 요약)
-
-| 현재 (`3961dc8`) | → 이 명세 |
-|---|---|
-| `dither.ts` Bayer 8×8, `uPixelSize 3`, `uContrast 1.15` | `ascii.ts` §1.4–1.5 (`uCellSize`, `uGamma 0.85`, `uContrast 0.92`, `uCut`, `uDither`, `uAtlas`…) |
-| 씬 타깃 = 화면 해상도 | 셀 격자 × 2 |
-| clear 검정 + 하늘 0.55–0.95 | 바탕 #0B0B0B, 하늘 §3.3 (천정 0) |
-| 지구 `MeshStandardMaterial` + 라이트 | `earthFrag` §2.2 + 대륙 마스크 |
-| `introDuration=4`, cubic, 단일 씬 lerp | 6.8s, §3.1 stage 표, 씬 A/B 크로스페이드 |
-| 카메라 끝 `(0,1.02,0.9)` look `(0,2.2,−1.5)` | scene B 원점, pitch 8°→55°, vfov 55/58/62 |
-| `airplaneInterval=10`, 경로 −2.2…2.4, ~45° | pass 28s · interval 45s · §4.1 world 경로 |
-| 삼각형 실루엣 + `lookAt(camera)` | planform §4.3, 고도 평면에 눕힘(빌보드 아님) |
-| `THREE.Line` 48 seg | 리본 2줄 × 56 seg §4.4 |
-| DPR ≤ 1.5 | DPR ≤ 2, 강등 시 1 |
-| reduced-motion: progress 0.5 | k = 0.42 정지, rAF 정지 |
+```
+A=/Users/illheon/agent-ops/luckyzz/handoff/40d-assets
+F=<워크트리>/public/fonts/PPLettraMono-Regular.otf
+python3 -I $A/mock_sar.py $F $A/landmask-ne-2048.png <out> desktop 0.5,4.0,5.5,8.2,21.76
+python3 -I $A/mock_sar.py $F $A/landmask-ne-2048.png <out> mobile 0.5,5.5,21.76
+python3 -I $A/mock_sar.py $F $A/landmask-ne-2048.png <out> desktop 5.5 u8       # §A 1b 8비트 폴백
+python3 -I $A/ramp_check.py $F  # §F 램프 실측: SAR 15단계 vs 16단계, Lettra Mono·Menlo
+python3 -I $A/verify_sar.py $F  # §F 그리드·fitText·램프, §C 패치가 덮는 각도, 경로·px/s, 좌표 대비(#000)
+python3 -I $A/verify_sar.py $F <out>/*.txt   # 프레임별 램프 단계 분포, 모서리·위아래 3줄 빈칸 비율
+python3 -I $A/cmp_fmt.py <out>/mock-sar-desktop-t05.50.txt   # float vs 8비트 폴백(같은 폴더에 -u8.txt 필요)
+python3 -I $A/path.py           # §C world 경로
+```
+목업은 톤 확인용이다(maxdiff는 요구하지 않음). 난수는 numpy(PCG64, 시드 20261010)라 JS의 mulberry32와 입자 배치는 다르고, 밀도·밝기·타이밍만 같다.
