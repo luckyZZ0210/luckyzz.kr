@@ -3,7 +3,7 @@
 - 작성: designer w9:p1 · 브랜치 `feature/design` · 2026-10-09
 - 대상 구현: `components/Hero/Scene.tsx`, `components/Hero/shaders/dither.ts` → **`shaders/ascii.ts`로 교체** (현재 기준 커밋 `3961dc8`)
 - 레퍼런스: `public/references/40/` (목록·출처는 §8, `public/references/40/README.md`)
-- 목업: `public/references/40/09-mock-globe.png`, `10-mock-sky-plane.png` — 이 문서의 수치를 그대로 CPU로 렌더한 결과(DPR 2, 1440×900). **구현 결과가 이 두 장과 톤이 같아야 한다.**
+- 목업: `public/references/40/09–12` — 이 문서의 수치를 그대로 CPU로 렌더한 결과(DPR 2로 렌더 → **LANCZOS로 CSS px 크기 축소**: 데스크톱 1440×900, 모바일 390×844). **구현 결과가 이 장들과 톤이 같아야 한다.** 재현: `agent-ops/luckyzz/handoff/40d-assets/mock.py` (명령은 handoff 40d-002)
 - Figma: 사용 안 함(목업은 위 CPU 렌더로 대체 — handoff 참고)
 
 ## 0. 이 phase의 비주얼 질문 → 답
@@ -48,8 +48,8 @@ pass 2  ascii.frag : 셀 중심에서 A·B 샘플(2×2 평균) → 휘도 → �
 | breakpoint | 셀 W×H (CSS px) | 1440×900 기준 격자 | 지구 지름(셀) |
 |---|---|---|---|
 | ≥ 1024 | **7 × 12** | 205 × 75 | ≈ 80 |
-| 640–1023 | **7 × 12** | — | — |
-| < 640 | **6 × 10** | 390×844 → 65 × 84 | ≈ 52 |
+| 640–1023 | **7 × 12** | 1024×1366 → 146 × 113 | ≈ 117 |
+| < 640 | **6 × 10** | 390×844 → 65 × 84 | ≈ 52 (지름 312px = 가로 80%) |
 
 - `uCellSize = vec2(round(cellW × dpr), round(cellH × dpr))` — **반드시 정수 device px**(소수면 격자가 아른거림).
 - DPR clamp: `min(devicePixelRatio, 2)`. ASCII 패스는 싸고 씬 타깃은 셀 격자 기준이라 기존 1.5 제한은 불필요. 저사양 강등 시 1 (§6).
@@ -163,8 +163,8 @@ void main() {
 
 | t (s) | stage | scene | 카메라 | easing |
 |---|---|---|---|---|
-| 0.0 – 1.0 | **S0 hold** | A | 지구 중심에서 **6.4R**, vfov **28°**, lookAt 중심 | 정지 (지구만 정렬 회전 중) |
-| 1.0 – 3.8 | **S1 descend** | A | 거리 **6.4R → 1.12R**, vfov **28° → 38°** | `easeInOutQuart` |
+| 0.0 – 1.0 | **S0 hold** | A | 지구 중심에서 **6.4R**, vfov **`vS0`** (§3.1a), lookAt 중심 | 정지 (지구만 정렬 회전 중) |
+| 1.0 – 3.8 | **S1 descend** | A | 거리 **6.4R → 1.12R**, vfov **`vS0` → `vS1`** (§3.1a) | `easeInOutQuart` |
 | 3.4 – 4.4 | **X crossfade** | A→B | `uSceneMix` 0 → 1 | `smoothstep` |
 | 3.4 – 4.4 | (B 도착) | B | pitch **8°** 고정 — 지평선 띠가 화면 아래 1/3에 보임 | — |
 | 4.4 – 6.8 | **S2 look-up** | B | pitch **8° → 55°** | `easeInOutSine` |
@@ -172,7 +172,24 @@ void main() {
 | 6.8 – 7.4 | 좌표 페이드인 | DOM | opacity 0 → 1 | `ease-out`, 600ms |
 | 8.0 | 첫 비행기 | B | §4 | — |
 
-- 지구 6.4R·vfov 28° → 지구 지름 ≈ 화면 높이의 60% (목업 09).
+- 지구 6.4R·vfov 28°(데스크톱) → 지구 지름 ≈ 화면 높이의 63% (목업 09).
+
+#### 3.1a scene A vfov — breakpoint별 (three.js vfov는 **세로 기준**이라 세로로 긴 화면에서 한 값을 쓰면 지구가 가로를 넘친다)
+
+규칙: 지구 지름 **D = min(0.63·H, 0.80·W)** (거리 6.4R 고정, vfov로 맞춤).
+
+```
+vS0 = 2·atan( H · tan(asin(1/6.4)) / D )        // tan(asin(1/6.4)) = 0.15826
+vS1 = 2·atan( 1.381 · tan(vS0 / 2) )            // 1.381 = tan19°/tan14° — 데스크톱 28°→38°와 같은 줌 비율
+```
+
+| breakpoint (기준 화면) | D | D / 가로 | `vS0` | `vS1` (S1 끝) | 목업 |
+|---|---|---|---|---|---|
+| ≥1024 (1440×900) | 567px | 39% | **28.2°** | **38.3°** | 09 |
+| 640–1023 (1024×1366) | 819px | 80% | **29.6°** | **40.0°** | — |
+| <640 (390×844) | 312px | 80% | **46.3°** | **61.2°** | 11 |
+
+- 표 값은 기준 화면 값이고, 구현은 resize마다 위 공식으로 다시 계산한다(어떤 화면비든 지구가 가로 80% 안에 들어감). 계산 검증: `handoff/40d-assets/path.py`.
 - 기존 4초·cubic은 "휙" 느낌이었음 → 6.8초, 시작/끝이 더 느린 Quart/Sine.
 
 ### 3.2 scene B (하늘) 카메라
@@ -247,7 +264,7 @@ void main() {
 | age 샘플 | `age_i = i × 0.25s`, i = 0…55 → **segments 56** (줄당) |
 | 위치 | `C_i = P(k − age_i / passDuration) − dir × 0.6S + side × (±0.18S + 0.04S × age_i)` — **비행기와 같은 P(k)에서 파생**(머리가 비행기에 붙어 다님) |
 | 반폭 | `w(age) = 0.030S × (1 + 2.5 × age / τ)` |
-| 휘도 | `0.85 × exp(−age / τ) × smoothstep(maxAge, maxAge − 3, age)` |
+| 휘도 | `0.85 × exp(−age / τ) × (1.0 − smoothstep(maxAge − 3, maxAge, age))` — GLSL `smoothstep`은 edge0 ≥ edge1이면 결과가 정의되지 않으므로 이 형태로 |
 | τ / maxAge | **9 s / 14 s** (기본). 화면상 길이 ≈ 14 × 62 px ≈ 870px (데스크톱) |
 | 최소 폭 | 화면에서 **≥ 1.5셀**(가까운 끝 기준). 미만이면 반폭 clamp |
 | k − age/T < 0 | 그 세그먼트 숨김 (출현 직후엔 짧게 자라남) |
@@ -330,8 +347,10 @@ void main() {
 | 6 | `06-plane-high-small.png` | https://www.cosmos.so/e/2139042093 | 화면 아래 구름 띠 + 높고 작은 비행기 + 긴 비운 = 고도감·느림 | 사진. 각도 ≈ 25–30°로 우리 24°와 비슷 |
 | 7 | `07-halftone-clouds.png` | https://www.cosmos.so/e/1539350611 | 흑백 하프톤 구름 — 지평선 안개 톤 | 하프톤 점(우리는 글자), 너무 밝음 |
 | 8 | `08-ascii-ramp-on-black.png` | https://www.cosmos.so/e/680293491 | 검은 바탕 ASCII ramp `.:'"d@` 계열, 여백이 많은 구성 | 다른 문자셋(소문자 섞임) |
-| 9 | `09-mock-globe.png` | 자체 목업(이 명세 수치) | S0 상태 톤 기준 | 지형 마스크는 임시(실제는 Natural Earth) |
-| 10 | `10-mock-sky-plane.png` | 자체 목업(이 명세 수치) | S3 + 비행기 k=0.42 + 좌표 | 구름 노이즈는 CPU 근사 |
+| 9 | `09-mock-globe.png` | 자체 목업(이 명세 수치) | 데스크톱 S0 상태 톤 기준 | 목업 마스크 = three.js r160 `earth_specular_2048.jpg` 반전(임시). 실제는 Natural Earth |
+| 10 | `10-mock-sky-plane.png` | 자체 목업(이 명세 수치) | 데스크톱 S3 + 비행기 k=0.42(§4.1 경로) + 좌표 | 구름 노이즈는 CPU 근사 |
+| 11 | `11-mock-globe-mobile.png` | 자체 목업(이 명세 수치) | 모바일 S0 — 지구가 가로 80% 안 (§3.1a) | 같은 임시 마스크 |
+| 12 | `12-mock-sky-plane-mobile.png` | 자체 목업(이 명세 수치) | 모바일 S3 + k=0.42 + 좌표 | — |
 
 기술 레퍼런스: [react-postprocessing ASCII effect](https://react-postprocessing.docs.pmnd.rs/effects/ascii)(canvas atlas + 휘도→글자, 기본 셀 16px — 우리는 7), [vfx-js AsciiEffect](https://amagi.dev/vfx-js/docs/classes/_vfx-js_effects.AsciiEffect.html)(ramp 단계 사이 Bayer 디더 — §1.5와 같은 방식), [three.js forum: ASCII post-processing](https://discourse.threejs.org/t/asci-threejs-post-processing/89064).
 

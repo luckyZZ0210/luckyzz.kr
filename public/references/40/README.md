@@ -1,6 +1,6 @@
 # 40 — 홈 히어로 레퍼런스
 
-명세: `docs/design/40-hero.md` §8. 01–08은 cosmos.so 요소의 560px 썸네일(출처 링크 참고), 09–10은 명세 수치로 직접 렌더한 목업.
+명세: `docs/design/40-hero.md` §8. 01–08은 cosmos.so 요소의 560px 썸네일(출처 링크 참고), 09–12는 명세 수치로 직접 렌더한 목업(DPR 2 렌더 → LANCZOS로 CSS px 크기 축소).
 
 | 파일 | 출처 | 한 줄 |
 |---|---|---|
@@ -12,5 +12,7 @@
 | 06-plane-high-small.png | https://www.cosmos.so/e/2139042093 | 아래쪽 구름 띠 + 높고 작은 비행기 — 고도감·느림 |
 | 07-halftone-clouds.png | https://www.cosmos.so/e/1539350611 | 흑백 하프톤 구름 — 지평선 안개 톤 |
 | 08-ascii-ramp-on-black.png | https://www.cosmos.so/e/680293491 | 검은 바탕 ASCII ramp, 넓은 여백 |
-| 09-mock-globe.png | 자체 목업 | S0 지구 상태 (지형 마스크 임시) |
-| 10-mock-sky-plane.png | 자체 목업 | S3 하늘 + 비행기 k=0.42 + 좌표 |
+| 09-mock-globe.png | 자체 목업 | 데스크톱 S0 지구 (마스크 임시: three.js r160 earth_specular_2048.jpg 반전) |
+| 10-mock-sky-plane.png | 자체 목업 | 데스크톱 S3 하늘 + 비행기 k=0.42 + 좌표 |
+| 11-mock-globe-mobile.png | 자체 목업 | 모바일 S0 지구 (가로 80% 안) |
+| 12-mock-sky-plane-mobile.png | 자체 목업 | 모바일 S3 하늘 + 비행기 k=0.42 + 좌표 |
