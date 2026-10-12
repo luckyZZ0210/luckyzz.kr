@@ -8,8 +8,10 @@ import { MAIN } from "@/lib/ia";
 export default function Header() {
   const pathname = usePathname();
   const isHome = pathname === "/";
+  const isArt = pathname === "/art" || pathname.startsWith("/art/");
 
-  if (isHome) {
+  // Dark variant: home (Fig. 1) and /art plates (Fig. 2, ART_DIRECTION §3).
+  if (isHome || isArt) {
     // Inline styles on purpose: globals.css has unlayered `* { padding: 0 }`
     // and `a { color; border-bottom }` that override Tailwind utilities.
     return (
@@ -40,7 +42,7 @@ export default function Header() {
         >
           luckyzz
         </Link>
-        <span>Fig. 1 — index</span>
+        <span>{isHome ? "Fig. 1 — index" : "Fig. 2 — plates"}</span>
         <span>37.39°N 127.11°E</span>
       </header>
     );
