@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef } from "react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
 import styles from "./PlateDial.module.css";
 import {
   AUTO_PULL,
@@ -31,7 +31,7 @@ type RuntimePlate = {
   p: number;
   i: number;
   src: string;
-  el: HTMLDivElement;
+  el: HTMLAnchorElement;
   img: HTMLImageElement;
   tk: HTMLDivElement;
   pt: number;
@@ -40,7 +40,6 @@ type RuntimePlate = {
 };
 
 export default function PlateDial({ projects, initialSlug }: Props) {
-  const router = useRouter();
   const stageRef = useRef<HTMLDivElement>(null);
   const stackRef = useRef<HTMLDivElement>(null);
   const rulerRef = useRef<HTMLDivElement>(null);
@@ -64,13 +63,17 @@ export default function PlateDial({ projects, initialSlug }: Props) {
 
   const plates = useMemo(() => getArtPlates(projects), [projects]);
 
-  // Derived initial pos: if initialSlug given, we are entering direct — skip animation, start opened.
-  const initialProjIdx = useMemo(
-    () => (initialSlug ? projects.findIndex((p) => p.slug === initialSlug) : -1),
-    [projects, initialSlug]
-  );
+  // Direct entry (/art/[slug]) starts opened without animation. Read once at mount only —
+  // later URL changes come from our own pushState/back and must not re-run the effect.
+  const initialSlugRef = useRef(initialSlug);
+  // Plate <a> click → runtime handler (set inside the effect).
+  const plateClickRef = useRef<((j: number, e: React.MouseEvent) => void) | null>(null);
+  const closeRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
+    const initialProjIdx = initialSlugRef.current
+      ? projects.findIndex((p) => p.slug === initialSlugRef.current)
+      : -1;
     const stage = stageRef.current!;
     const stack = stackRef.current!;
     const ruler = rulerRef.current!;
@@ -81,20 +84,11 @@ export default function PlateDial({ projects, initialSlug }: Props) {
 
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-    // Build plate DOM
+    // Plates are SSR-rendered <a href="/art/slug"> (§8); ticks are built here.
+    const plateEls = Array.from(stack.querySelectorAll<HTMLAnchorElement>("a[data-j]"));
     const rp: RuntimePlate[] = plates.map((pl) => {
-      const el = document.createElement("div");
-      el.className = styles.pl;
-      el.dataset.j = String(pl.j);
-      const im = new Image();
-      im.src = pl.src;
-      im.alt = "";
-      el.appendChild(im);
-      const n = document.createElement("span");
-      n.className = styles.num;
-      n.textContent = `${String(pl.p + 1).padStart(2, "0")}.${pl.i + 1}`;
-      el.appendChild(n);
-      stack.appendChild(el);
+      const el = plateEls[pl.j];
+      const im = el.querySelector("img")!;
       const tk = document.createElement("div");
       tk.className = styles.tk + (pl.i === 0 ? " " + styles.major : "");
       tk.style.top = pl.j * TICK + "px";
@@ -113,9 +107,35 @@ export default function PlateDial({ projects, initialSlug }: Props) {
       ruler.appendChild(tk);
       return { ...pl, el, img: im, tk, pt: 0, gone: false };
     });
-    rp.forEach((pl) => {
-      pl.el.addEventListener("click", () => onPlateClick(pl));
-    });
+    plateClickRef.current = (j, e) => {
+      e.preventDefault();
+      const pl = rp[j];
+      // keyboard activation (Enter on a focused plate) opens that plate directly
+      if (e.detail === 0 && (state === "browse" || state === "cancel")) {
+        markInput();
+        target = pl.j;
+        queue = 0;
+        startPull(performance.now(), true);
+        return;
+      }
+      onPlateClick(pl);
+    };
+    // Tab focus on a plate jumps the dial to it (keyboard only, not mouse-down focus)
+    const onPlateFocus = (e: FocusEvent) => {
+      const el = e.target as HTMLElement;
+      if (!el.matches(":focus-visible") || el.dataset.j === undefined) return;
+      if (state !== "browse" && state !== "cancel") return;
+      markInput();
+      target = Number(el.dataset.j);
+      queue = 0;
+    };
+    stack.addEventListener("focusin", onPlateFocus);
+    // focusing an element inside overflow:hidden can scroll the stage — keep it pinned
+    const onStageScroll = () => {
+      stage.scrollTop = 0;
+      stage.scrollLeft = 0;
+    };
+    stage.addEventListener("scroll", onStageScroll);
     if (hudTRef.current) hudTRef.current.textContent = String(rp.length).padStart(2, "0");
 
     let W = 0,
@@ -146,6 +166,10 @@ export default function PlateDial({ projects, initialSlug }: Props) {
     let hotTo: ReturnType<typeof setTimeout> | null = null;
     let tickTo: ReturnType<typeof setTimeout> | null = null;
     let openSettleTo: ReturnType<typeof setTimeout> | null = null;
+    let throughTo: ReturnType<typeof setTimeout> | null = null;
+    // openedInApp: this tab pushed /art/slug (close = history.back). fromPop: open triggered by Forward.
+    let openedInApp = false;
+    let fromPop = false;
     let closeTo: ReturnType<typeof setTimeout> | null = null;
 
     function layout() {
@@ -314,8 +338,12 @@ export default function PlateDial({ projects, initialSlug }: Props) {
       void proj.offsetWidth;
       proj.classList.add(styles.open);
       hot(HOT_MS_OPEN);
-      // URL push
-      router.push(`/art/${P.slug}`, { scroll: false });
+      // URL push — native history keeps this PlateDial mounted (no route change)
+      if (!fromPop) {
+        window.history.pushState(null, "", `/art/${P.slug}`);
+        openedInApp = true;
+      }
+      fromPop = false;
       if (openSettleTo) clearTimeout(openSettleTo);
       openSettleTo = setTimeout(
         () => {
@@ -327,14 +355,18 @@ export default function PlateDial({ projects, initialSlug }: Props) {
         reduce ? 30 : 720
       );
     }
-    function closeProject() {
+    function closeProject(viaPop = false) {
       if (state !== "open") return;
       setState("closing");
-      proj.classList.remove(styles.open);
+      proj.classList.remove(styles.instant, styles.open);
       proj.classList.add(styles.closing);
       hot(HOT_MS_CLOSE);
-      // URL back
-      router.push("/art", { scroll: false });
+      // URL pop: back if we pushed it, otherwise (direct entry) replace in place
+      if (!viaPop) {
+        if (openedInApp) window.history.back();
+        else window.history.replaceState(null, "", "/art");
+      }
+      openedInApp = false;
       if (closeTo) clearTimeout(closeTo);
       closeTo = setTimeout(
         () => {
@@ -413,7 +445,7 @@ export default function PlateDial({ projects, initialSlug }: Props) {
         }
         if (all) {
           setState("through");
-          setTimeout(openProject, 120);
+          throughTo = setTimeout(openProject, 120);
         }
       }
       if (state === "cancel" || state === "return") {
@@ -494,6 +526,8 @@ export default function PlateDial({ projects, initialSlug }: Props) {
         if (state === "pull") cancelPull();
         queue -= 1;
       }
+      // Enter on a focused plate is handled by its <a> click (opens that plate)
+      if (e.key === "Enter" && (e.target as HTMLElement).closest?.("a[data-j]")) return;
       if (e.key === "Enter" && (state === "browse" || state === "cancel")) {
         markInput();
         startPull(performance.now(), true);
@@ -506,6 +540,26 @@ export default function PlateDial({ projects, initialSlug }: Props) {
     stage.addEventListener("pointerup", onPointerUp);
     stage.addEventListener("pointercancel", onPointerUp);
     document.addEventListener("keydown", onKey);
+    closeRef.current = () => closeProject();
+    // Browser Back/Forward: /art ↔ /art/slug drive the same close/open animation
+    const onPopState = () => {
+      const m = window.location.pathname.match(/^\/art\/([^/]+)\/?$/);
+      if (!m) {
+        closeProject(true);
+        return;
+      }
+      if (state !== "browse" && state !== "cancel") return;
+      const pi = projects.findIndex((p) => p.slug === decodeURIComponent(m[1]));
+      const first = rp.find((pl) => pl.p === pi && pl.i === 0);
+      if (!first) return;
+      pos = target = first.j;
+      vel = 0;
+      queue = 0;
+      fromPop = true;
+      openedInApp = true;
+      startPull(performance.now(), true);
+    };
+    window.addEventListener("popstate", onPopState);
     let resizeTo: ReturnType<typeof setTimeout> | null = null;
     const onResize = () => {
       if (resizeTo) clearTimeout(resizeTo);
@@ -580,39 +634,48 @@ export default function PlateDial({ projects, initialSlug }: Props) {
       stage.removeEventListener("pointerup", onPointerUp);
       stage.removeEventListener("pointercancel", onPointerUp);
       document.removeEventListener("keydown", onKey);
+      window.removeEventListener("popstate", onPopState);
       window.removeEventListener("resize", onResize);
+      stack.removeEventListener("focusin", onPlateFocus);
+      stage.removeEventListener("scroll", onStageScroll);
+      plateClickRef.current = null;
+      closeRef.current = null;
       if (hotTo) clearTimeout(hotTo);
       if (tickTo) clearTimeout(tickTo);
       if (openSettleTo) clearTimeout(openSettleTo);
+      if (throughTo) clearTimeout(throughTo);
       if (closeTo) clearTimeout(closeTo);
       if (resizeTo) clearTimeout(resizeTo);
-      rp.forEach((pl) => {
-        pl.el.remove();
-        pl.tk.remove();
-      });
+      rp.forEach((pl) => pl.tk.remove());
     };
-  }, [plates, projects, initialProjIdx, router]);
+  }, [plates, projects]);
 
+  // Header is the global one (dark "Fig. 2 — plates" on /art, owned by 41a).
   return (
     <div ref={stageRef} className={styles.stage} id="art-stage">
-      <header className={styles.header}>
-        <span className={styles.w}>luckyzz</span>
-        <nav>
-          <a href="/art" className={styles.on}>art</a>
-          <a href="/build">build</a>
-          <a href="/coffee">coffee</a>
-          <a href="/blog">blog</a>
-          <a href="/about">about</a>
-        </nav>
-        <span>Fig. 2 — plates / 37.5665°N 126.9780°E</span>
-      </header>
-
       <div className={styles.dial}>
         <div ref={rulerRef} className={styles.ruler} />
       </div>
       <div ref={indRef} className={styles.ind} />
 
-      <div ref={stackRef} className={styles.stack} />
+      <div ref={stackRef} className={styles.stack}>
+        {plates.map((pl) => (
+          <Link
+            key={pl.j}
+            href={`/art/${projects[pl.p].slug}`}
+            prefetch={false}
+            scroll={false}
+            className={styles.pl}
+            data-j={pl.j}
+            aria-label={`${String(pl.p + 1).padStart(2, "0")}.${pl.i + 1} ${projects[pl.p].title}`}
+            onClick={(e) => plateClickRef.current?.(pl.j, e)}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element -- CSS 3D plate, sized by layout() */}
+            <img src={pl.src} alt="" />
+            <span className={styles.num}>{`${String(pl.p + 1).padStart(2, "0")}.${pl.i + 1}`}</span>
+          </Link>
+        ))}
+      </div>
       <div ref={slitRef} className={styles.slit}>
         <span className={styles.lab}>SLIT</span>
       </div>
@@ -635,10 +698,7 @@ export default function PlateDial({ projects, initialSlug }: Props) {
           <button
             type="button"
             className={styles.back}
-            onClick={() => {
-              const ev = new KeyboardEvent("keydown", { key: "Escape" });
-              document.dispatchEvent(ev);
-            }}
+            onClick={() => closeRef.current?.()}
           >
             ← plates (esc)
           </button>

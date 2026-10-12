@@ -7,6 +7,10 @@
   position: relative;
   height: 100svh;
   min-height: 560px;
+  /* stage starts at y=0 under the global fixed header (overlay, like the prototype header).
+     layout <main className="pt-20"> is already 0 here: globals.css unlayered `* { padding: 0 }`
+     beats the Tailwind utility, so no negative margin (-5rem would shift the stage up 80px). */
+  margin-top: 0;
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
@@ -16,30 +20,6 @@
   font-family: var(--font-pp-lettra-mono), ui-monospace, Menlo, monospace;
   font-size: 12px;
 }
-
-.header {
-  position: absolute;
-  inset: 0 0 auto 0;
-  z-index: 7;
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 12px;
-  padding: 14px 20px;
-  font-size: 11px;
-  border-bottom: 1px solid var(--ink);
-  background: var(--void);
-}
-.header .w {
-  font-family: var(--font-mulche), sans-serif;
-  font-size: 22px;
-  line-height: 1;
-  letter-spacing: 0.01em;
-}
-.header a { color: inherit; text-decoration: none; }
-.header nav { display: flex; gap: 14px; }
-.header nav a { color: var(--soft); }
-.header nav a.on { color: var(--ink); }
 
 .hud {
   position: absolute;
@@ -135,6 +115,10 @@
   will-change: transform, opacity;
   backface-visibility: hidden;
   cursor: pointer;
+  /* plates are <a>: undo globals.css a { border-bottom; transition } */
+  border: 0;
+  transition: none;
+  color: inherit;
 }
 .pl img {
   position: absolute;
@@ -339,7 +323,6 @@
 @media (max-width: 700px) {
   .dial,
   .ind { display: none; }
-  .header nav { display: none; }
   .meta { left: 20px; top: 70px; width: calc(100% - 40px); }
   .meta .n { font-size: 64px; }
   .meta h2 { font-size: 20px; margin-top: 12px; }
