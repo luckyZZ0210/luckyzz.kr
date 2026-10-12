@@ -13,6 +13,7 @@ export interface Post {
   date: string;
   excerpt?: string;
   tags?: string[];
+  category?: string | null;
   content?: string;
 }
 
@@ -50,6 +51,7 @@ export function getAllPosts(): Post[] {
         date: data.date || '',
         excerpt: data.excerpt || '',
         tags: data.tags || [],
+        category: data.category || null,
       };
     });
 
