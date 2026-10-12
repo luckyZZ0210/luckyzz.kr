@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { homeTokenStyle } from "@/components/home/tokens";
+import { MAIN } from "@/lib/ia";
 
 export default function Header() {
   const pathname = usePathname();
@@ -53,10 +54,11 @@ export default function Header() {
             luckyzz.kr
           </Link>
           <div className="flex gap-8 text-sm">
-            <Link href="/thinking" className="border-0 hover:opacity-50 transition-opacity">Thinking</Link>
-            <Link href="/work" className="border-0 hover:opacity-50 transition-opacity">Work</Link>
-            <Link href="/experiments" className="border-0 hover:opacity-50 transition-opacity">Experiments</Link>
-            <Link href="/info" className="border-0 hover:opacity-50 transition-opacity">Info</Link>
+            {MAIN.map((m) => (
+              <Link key={m.id} href={m.route} className="border-0 hover:opacity-50 transition-opacity">
+                {m.label.charAt(0).toUpperCase() + m.label.slice(1)}
+              </Link>
+            ))}
           </div>
         </div>
       </div>
