@@ -1,0 +1,338 @@
+.stage {
+  --void: #0A0B0C;
+  --ink: #E9E9E3;
+  --soft: #6E7378;
+  --acc: #9DB8FF;
+  --edge: rgba(233, 233, 227, 0.55);
+  position: relative;
+  height: 100svh;
+  min-height: 560px;
+  /* stage starts at y=0 under the global fixed header (overlay, like the prototype header).
+     layout <main className="pt-20"> is already 0 here: globals.css unlayered `* { padding: 0 }`
+     beats the Tailwind utility, so no negative margin (-5rem would shift the stage up 80px). */
+  margin-top: 0;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  background: var(--void);
+  color: var(--ink);
+  font-family: var(--font-pp-lettra-mono), ui-monospace, Menlo, monospace;
+  font-size: 12px;
+}
+
+.hud {
+  position: absolute;
+  z-index: 7;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--soft);
+  pointer-events: none;
+}
+.hud b { color: var(--ink); font-weight: 400; font-variant-numeric: tabular-nums; }
+.hud i { font-style: normal; color: var(--acc); }
+.bl { left: 20px; bottom: 16px; }
+.br { right: 20px; bottom: 16px; text-align: right; }
+
+/* dial */
+.dial {
+  position: absolute;
+  left: 0;
+  top: 50px;
+  bottom: 0;
+  width: 200px;
+  z-index: 4;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(transparent, #000 24%, #000 76%, transparent);
+  mask-image: linear-gradient(transparent, #000 24%, #000 76%, transparent);
+}
+.ruler {
+  position: absolute;
+  left: 24px;
+  top: 50%;
+  will-change: transform;
+}
+.tk {
+  position: absolute;
+  left: 0;
+  height: 1px;
+  width: 10px;
+  background: var(--soft);
+  opacity: 0.55;
+}
+.tk.major { width: 22px; background: var(--ink); opacity: 1; }
+.tk .lb {
+  position: absolute;
+  left: 30px;
+  top: -7px;
+  white-space: nowrap;
+  font-size: 10.5px;
+  line-height: 14px;
+  color: var(--soft);
+  cursor: pointer;
+  pointer-events: auto;
+}
+.tk .lb b { color: var(--ink); font-weight: 400; margin-right: 7px; }
+.tk .lb small { font-size: 9.5px; margin-left: 6px; opacity: 0.7; }
+.tk.cur { background: var(--acc); }
+.tk.cur .lb,
+.tk.cur .lb b { color: var(--acc); }
+
+.ind {
+  position: absolute;
+  left: 14px;
+  top: calc(50% + 25px);
+  width: 42px;
+  height: 1px;
+  background: var(--acc);
+  z-index: 5;
+  pointer-events: none;
+  transition: box-shadow 0.12s;
+}
+.ind::before {
+  content: "";
+  position: absolute;
+  left: -9px;
+  top: -3.5px;
+  border: 3.5px solid transparent;
+  border-left: 6px solid var(--acc);
+}
+.ind.tick { box-shadow: 0 0 10px 1px var(--acc); }
+
+/* stack */
+.stack {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  z-index: 2;
+  transition: opacity 0.5s;
+}
+.stack.dim { opacity: 0.14; }
+.pl {
+  position: absolute;
+  overflow: hidden;
+  background: #000;
+  will-change: transform, opacity;
+  backface-visibility: hidden;
+  cursor: pointer;
+  /* plates are <a>: undo globals.css a { border-bottom; transition } */
+  border: 0;
+  transition: none;
+  color: inherit;
+}
+.pl img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  pointer-events: none;
+}
+.pl::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-right: 2px solid var(--edge);
+  border-top: 1px solid rgba(233, 233, 227, 0.2);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+}
+.pl.pulling { box-shadow: -70px 0 44px -22px rgba(157, 184, 255, 0.38); }
+.pl .num {
+  position: absolute;
+  left: 9px;
+  bottom: 7px;
+  font-size: 9.5px;
+  color: var(--ink);
+  opacity: 0.75;
+  letter-spacing: 0.06em;
+  text-shadow: 0 0 5px #000, 0 0 2px #000;
+}
+
+/* slit */
+.slit {
+  position: absolute;
+  top: 15%;
+  height: 70%;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--ink);
+  opacity: 0.22;
+  z-index: 3;
+  transition: opacity 0.22s, box-shadow 0.22s, background 0.22s;
+  pointer-events: none;
+}
+.slit.hot { opacity: 1; background: var(--acc); box-shadow: 0 0 24px 3px rgba(157, 184, 255, 0.6); }
+.slit .lab {
+  position: absolute;
+  left: 10px;
+  top: 0;
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  color: var(--soft);
+  writing-mode: vertical-rl;
+}
+
+/* project */
+.proj {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  background: var(--void);
+  display: none;
+  transform: scaleX(0.004);
+  opacity: 0;
+  pointer-events: none;
+  will-change: transform;
+  transition: transform 0.7s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.08s;
+}
+.proj.open { transform: scaleX(1); opacity: 1; pointer-events: auto; }
+.proj.closing {
+  transition: transform 0.42s cubic-bezier(0.7, 0, 0.84, 0), opacity 0.08s 0.36s;
+  transform: scaleX(0.004);
+  opacity: 0;
+  pointer-events: none;
+}
+.proj.instant {
+  display: block;
+  transform: scaleX(1);
+  opacity: 1;
+  pointer-events: auto;
+  transition: none;
+}
+.proj .edges {
+  position: absolute;
+  inset: 0;
+  border-left: 2px solid var(--acc);
+  border-right: 2px solid var(--acc);
+  pointer-events: none;
+  transition: opacity 0.45s 0.45s;
+}
+.proj.open .edges,
+.proj.instant .edges { opacity: 0; }
+
+.meta {
+  position: absolute;
+  left: 40px;
+  top: 86px;
+  width: min(28%, 320px);
+  z-index: 2;
+}
+.meta .n {
+  font-family: var(--font-mulche), sans-serif;
+  font-size: 96px;
+  line-height: 0.8;
+  color: var(--acc);
+  letter-spacing: -0.02em;
+}
+.meta h2 {
+  font-family: var(--font-arita-buri), serif;
+  font-size: 26px;
+  line-height: 1.3;
+  margin: 20px 0 4px;
+  font-weight: 700;
+  text-wrap: balance;
+}
+.meta .ko {
+  font-family: var(--font-arita-buri), serif;
+  font-size: 14px;
+  color: var(--soft);
+  margin: 0 0 18px;
+}
+.meta dl {
+  display: grid;
+  grid-template-columns: 6.5em minmax(0, 1fr);
+  gap: 4px 10px;
+  font-size: 10.5px;
+  margin: 0 0 20px;
+}
+.meta dt { color: var(--soft); }
+.meta dd { margin: 0; font-variant-numeric: tabular-nums; }
+.meta p {
+  font-family: var(--font-arita-buri), serif;
+  font-size: 13.5px;
+  line-height: 1.75;
+  margin: 0 0 24px;
+}
+.meta .back {
+  font-size: 11px;
+  color: var(--ink);
+  text-decoration: none;
+  border-bottom: 1px solid var(--soft);
+  padding-bottom: 2px;
+  cursor: pointer;
+  background: none;
+  border-left: none;
+  border-right: none;
+  border-top: none;
+  font-family: inherit;
+  padding-left: 0;
+  padding-right: 0;
+}
+.meta .back:hover { border-bottom-color: var(--acc); color: var(--acc); }
+
+.strip {
+  position: absolute;
+  left: 36%;
+  top: 50%;
+  height: 50%;
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  will-change: transform;
+  perspective: 1400px;
+  perspective-origin: 0 50%;
+}
+.sheet {
+  position: relative;
+  height: 100%;
+  flex: none;
+  background: #000;
+  transform: rotateY(-89deg) scaleX(0.3);
+  transform-origin: 0 50%;
+  transition: transform 0.62s cubic-bezier(0.16, 1, 0.3, 1);
+  backface-visibility: hidden;
+  margin: 0;
+}
+.proj.open .sheet,
+.proj.instant .sheet { transform: none; }
+.sheet img { height: 100%; width: auto; display: block; max-width: none; }
+.sheet::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-right: 2px solid var(--edge);
+  border-top: 1px solid rgba(233, 233, 227, 0.2);
+  pointer-events: none;
+}
+.sheet .cap {
+  position: absolute;
+  left: 0;
+  bottom: -20px;
+  font-size: 9.5px;
+  color: var(--soft);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+.strip .end { flex: none; width: 40px; }
+
+.stage a:focus-visible,
+.meta .back:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
+
+@media (max-width: 700px) {
+  .dial,
+  .ind { display: none; }
+  .meta { left: 20px; top: 70px; width: calc(100% - 40px); }
+  .meta .n { font-size: 64px; }
+  .meta h2 { font-size: 20px; margin-top: 12px; }
+  .meta p { display: none; }
+  .meta dl { margin-bottom: 12px; }
+  .strip { left: 20px; top: auto; bottom: 84px; height: 32%; transform: none; }
+  .hud.br { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .proj,
+  .sheet,
+  .proj.closing { transition: none; }
+}
