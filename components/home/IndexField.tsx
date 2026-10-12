@@ -731,9 +731,10 @@ export default function IndexField() {
         position: "relative",
         height: "100svh",
         minHeight: C.MIN_H,
-        // Cancel the layout's <main className="pt-20"> so the hero starts at 0
-        // under the fixed header (layout.tsx is out of scope for 41a).
-        marginTop: "-5rem",
+        // Stage starts at y=0 under the fixed header. No offset needed: the
+        // unlayered `* { padding: 0 }` in globals.css already zeroes the
+        // layout's <main className="pt-20"> (same baseline as 41c /art).
+        marginTop: 0,
         background: "var(--void)",
         color: "var(--ink)",
         overflow: "hidden",
