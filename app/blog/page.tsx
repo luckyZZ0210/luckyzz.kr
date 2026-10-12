@@ -6,13 +6,51 @@ export const metadata = {
   description: 'Thoughts, ideas, and writings',
 };
 
-export default function BlogPage() {
-  const posts = getAllPosts();
+const CATEGORIES = [
+  { key: 'all', label: 'All', href: '/blog' },
+  { key: 'thinking', label: 'Thinking', href: '/blog?category=thinking' },
+  { key: 'daily', label: 'Daily', href: '/blog?category=daily' },
+  { key: 'coffee', label: 'Coffee', href: '/blog?category=coffee' },
+];
+
+type BlogSearchParams = Promise<{ category?: string }>;
+
+export default async function BlogPage({
+  searchParams,
+}: {
+  searchParams: BlogSearchParams;
+}) {
+  const { category } = await searchParams;
+  const active =
+    category && CATEGORIES.some((c) => c.key === category) ? category : 'all';
+
+  const posts = getAllPosts().filter((p) =>
+    active === 'all' ? true : p.category === active
+  );
 
   return (
     <div className="max-w-4xl mx-auto px-6 py-16 min-h-[calc(100vh-5rem)]">
       <h1 className="text-5xl font-medium mb-4">Blog</h1>
-      <p className="text-gray-600 mb-16">Thoughts, ideas, and writings.</p>
+      <p className="text-gray-600 mb-8">Thoughts, ideas, and writings.</p>
+
+      <div className="flex gap-2 flex-wrap mb-12">
+        {CATEGORIES.map((c) => {
+          const selected = c.key === active;
+          return (
+            <Link
+              key={c.key}
+              href={c.href}
+              className={`text-sm px-3 py-1 border border-black no-underline transition-colors ${
+                selected
+                  ? 'bg-black text-white'
+                  : 'bg-white text-black hover:bg-gray-100'
+              }`}
+            >
+              {c.label}
+            </Link>
+          );
+        })}
+      </div>
 
       {posts.length > 0 ? (
         <div className="space-y-8">
@@ -46,7 +84,9 @@ export default function BlogPage() {
       ) : (
         <div className="text-center py-16">
           <p className="text-gray-600">
-            No posts yet. Add markdown files to /content/blog to get started.
+            {active === 'all'
+              ? 'No posts yet. Add markdown files to /content/blog to get started.'
+              : `No posts in "${active}".`}
           </p>
         </div>
       )}
