@@ -2,10 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { MAIN, LINKS, IMG, ROUTES } from "@/lib/ia";
+import { homeTokenStyle } from "./tokens";
 
 // ─── Motion & layout constants (spec §5, §6) ────────────────────────────────
 const C = {
   CENTER_Y: 0.54,
+  MIN_H: 560,
   ORBIT_RX_DESK: 270,
   ORBIT_RX_FRAC_DESK: 0.22,
   ORBIT_RX_FRAC_MOB: 0.27,
@@ -14,12 +16,17 @@ const C = {
   OUTER_SCALE: 1.6,
   MAIN_H: 30,
   SUB_H: 22,
-  MAIN_PX_DESK: 13,
-  MAIN_PX_MOB: 12,
-  SUB_PX_DESK: 11,
-  SUB_PX_MOB: 10,
+  MAIN_PX: 13,
+  SUB_PX: 11,
   NUM_PX: 10,
+  NUM_OFFSET_Y: 9,
   NODE_PAD_X: 11,
+  SUB_BELOW: 44,
+  SUB_SIDE: 34,
+  SUB_STACK: 30,
+  EDGE_DRAW_MS: 1100,
+  EDGE_STAGGER_MS: 60,
+  LEAD_DELAY_MS: 250,
   REPEL_R: 40,
   REPEL_F: 2.6,
   REPEL_JITTER: 0.45,
@@ -29,14 +36,13 @@ const C = {
   REST_FRAMES: 10,
   BITMAP_ERASE: 2.2,
   IMG_W_MAIN_DESK: 250,
-  IMG_H_MAIN_DESK: 180,
   IMG_W_SUB_DESK: 190,
-  IMG_H_SUB_DESK: 137,
   IMG_W_MAIN_MOB: 170,
   IMG_W_SUB_MOB: 140,
   IMG_SAMPLE_STEP: 2,
   IMG_MAX_DESK: 6500,
   IMG_MAX_MOB: 3600,
+  IMG_DELAY_FRAMES: 26,
   IMG_SPRING_ARRIVE: 0.045,
   IMG_SPRING_DEPART: 0.06,
   IMG_DAMP: 0.8,
@@ -45,6 +51,7 @@ const C = {
   IMG_HOVER_JITTER: 1.3,
   POINT_NODE: 1.2,
   POINT_IMG: 1.5,
+  TAP_WINDOW_MS: 1000,
 };
 
 export default function IndexField() {
@@ -70,36 +77,39 @@ export default function IndexField() {
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const ns = "http://www.w3.org/2000/svg";
 
-    // Load images once.
+    // Representative images are requested on first interaction (spec §7, LCP).
     const imgs: Record<string, HTMLImageElement> = {};
-    for (const k of Object.keys(IMG)) {
-      const im = new Image();
-      im.src = IMG[k];
-      imgs[k] = im;
-    }
+    let imgsRequested = false;
+    const preloadImages = () => {
+      if (imgsRequested) return;
+      imgsRequested = true;
+      for (const k of Object.keys(IMG)) {
+        const im = new Image();
+        im.src = IMG[k];
+        imgs[k] = im;
+      }
+    };
 
     let W = 0, H = 0, dpr = 1;
     let mx = -9999, my = -9999;
     let raf = 0;
     let hub = { x: 0, y: 0 };
     let narrow = false;
-    const mode = "dark";
-    const colorMode = "color" as const;
+    let fontsReady = false;
+    let edgesDrawn = false;
+    const TK = { void: "", ink: "", soft: "", accent: "" };
 
     type Node = {
       id: string;
       parent: string | null;
-      x: number;
-      y: number;
-      w: number;
-      h: number;
+      x: number; y: number;
+      w: number; h: number;
       lab: string;
       num?: string;
       px: number;
       main: 0 | 1;
       acc?: boolean;
-      ux: number;
-      uy: number;
+      ux: number; uy: number;
     };
     let nodes: Node[] = [];
     type Pt = {
@@ -111,6 +121,7 @@ export default function IndexField() {
       rest: number;
       held: 0 | 1;
       n: number;
+      num: boolean; // pixel belongs to the [0n] label
     };
     let pts: Pt[] = [];
     let byNode: Pt[][] = [];
@@ -129,11 +140,20 @@ export default function IndexField() {
     };
     let parts: Part[] = [];
     let lead: SVGPolylineElement, cap: SVGTextElement;
+    let showTimer: ReturnType<typeof setTimeout> | undefined;
 
     const monoFamily = () =>
       getComputedStyle(document.documentElement)
         .getPropertyValue("--font-pp-lettra-mono")
         .trim() || "ui-monospace, Menlo, monospace";
+
+    const readTokens = () => {
+      const cs = getComputedStyle(host);
+      TK.void = cs.getPropertyValue("--void").trim();
+      TK.ink = cs.getPropertyValue("--ink").trim();
+      TK.soft = cs.getPropertyValue("--soft").trim();
+      TK.accent = cs.getPropertyValue("--accent").trim();
+    };
 
     const measure = (txt: string, px: number) => {
       ctx.font = `${px}px ${monoFamily()}`;
@@ -146,7 +166,38 @@ export default function IndexField() {
       return e;
     };
 
+    // Section of a node (main id) — used for accent highlighting.
+    const sectionOf = (n: Node) => n.parent || n.id;
+
+    // Sequential draw-on of connection lines (spec §6: 1100ms, 60ms apart).
+    // Each line gets a mask whose solid stroke is revealed by dashoffset, so
+    // dashed edges keep their own dash pattern while being drawn.
+    function drawOnLines(items: { el: SVGElement; d: string; len: number }[]) {
+      const defs = g("defs", {});
+      svg.insertBefore(defs, svg.firstChild);
+      items.forEach(({ el, d, len }, i) => {
+        const id = `if-draw-${i}`;
+        const m = g("mask", { id, maskUnits: "userSpaceOnUse", x: 0, y: 0, width: W, height: H });
+        const mp = g("path", {
+          d, fill: "none", stroke: "#fff", "stroke-width": 6,
+          "stroke-dasharray": `${len} ${len}`, "stroke-dashoffset": len,
+        });
+        m.appendChild(mp);
+        defs.appendChild(m);
+        el.setAttribute("mask", `url(#${id})`);
+        const anim = mp.animate(
+          [{ strokeDashoffset: `${len}px` }, { strokeDashoffset: "0px" }],
+          { duration: C.EDGE_DRAW_MS, delay: i * C.EDGE_STAGGER_MS, easing: "ease-out", fill: "forwards" }
+        );
+        anim.onfinish = () => {
+          el.removeAttribute("mask");
+          m.remove();
+        };
+      });
+    }
+
     function layout() {
+      readTokens();
       const r = host.getBoundingClientRect();
       W = r.width; H = r.height;
       dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -167,38 +218,30 @@ export default function IndexField() {
       hub = { x: cx, y: cy };
       nodes = [];
       parts = [];
-      const FM = narrow ? C.MAIN_PX_MOB : C.MAIN_PX_DESK;
-      const FS = narrow ? C.SUB_PX_MOB : C.SUB_PX_DESK;
+      hov = null;
+      const FM = C.MAIN_PX, FS = C.SUB_PX;
 
       MAIN.forEach((m) => {
         const a = (m.ang * Math.PI) / 180;
         const ux = Math.cos(a), uy = Math.sin(a);
         const nd: Node = {
-          id: m.id,
-          parent: null,
-          x: cx + ux * rx,
-          y: cy + uy * ry,
-          w: measure(m.label, FM) + 22,
-          h: C.MAIN_H,
-          lab: m.label,
-          num: `[${m.n}]`,
-          px: FM,
-          main: 1,
-          ux, uy,
+          id: m.id, parent: null,
+          x: cx + ux * rx, y: cy + uy * ry,
+          w: measure(m.label, FM) + C.NODE_PAD_X * 2, h: C.MAIN_H,
+          lab: m.label, num: `[${m.n}]`, px: FM, main: 1, ux, uy,
         };
         nodes.push(nd);
         const k = m.sub.length;
         const subs = m.sub.map((s) => ({ s, w: measure(s.label, FS) + 16 }));
         const vertical = narrow || Math.abs(uy) > Math.abs(ux) * 1.5;
         if (vertical) {
+          // Always below the parent (spec §5), including mobile.
           const tot = subs.reduce((acc, b) => acc + b.w, 0) + (k - 1) * 8;
           let x = nd.x - tot / 2;
-          const y = nd.y + (uy >= 0 ? 1 : -1) * 44;
+          const y = nd.y + C.SUB_BELOW;
           subs.forEach(({ s, w }) => {
             nodes.push({
-              id: s.id, parent: m.id,
-              x: x + w / 2, y,
-              w, h: C.SUB_H,
+              id: s.id, parent: m.id, x: x + w / 2, y, w, h: C.SUB_H,
               lab: s.label, px: FS, main: 0, acc: s.acc, ux, uy,
             });
             x += w + 8;
@@ -208,10 +251,9 @@ export default function IndexField() {
           subs.forEach(({ s, w }, i) => {
             nodes.push({
               id: s.id, parent: m.id,
-              x: nd.x + dir * (nd.w / 2 + 34 + w / 2),
-              y: nd.y + (i - (k - 1) / 2) * 30 - (k === 1 ? 16 : 0),
-              w, h: C.SUB_H,
-              lab: s.label, px: FS, main: 0, acc: s.acc, ux, uy,
+              x: nd.x + dir * (nd.w / 2 + C.SUB_SIDE + w / 2),
+              y: nd.y + (i - (k - 1) / 2) * C.SUB_STACK - (k === 1 ? 16 : 0),
+              w, h: C.SUB_H, lab: s.label, px: FS, main: 0, acc: s.acc, ux, uy,
             });
           });
         }
@@ -225,21 +267,27 @@ export default function IndexField() {
       svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
       svg.innerHTML = "";
       lines = [];
+      const drawItems: { el: SVGElement; d: string; len: number }[] = [];
 
       svg.appendChild(g("ellipse", { class: "orbit", cx, cy, rx, ry }));
       svg.appendChild(g("ellipse", { class: "orbit", cx, cy, rx: rx * C.OUTER_SCALE, ry: ry * C.OUTER_SCALE }));
       svg.appendChild(g("line", { class: "cross", x1: cx - 6, y1: cy, x2: cx + 6, y2: cy }));
       svg.appendChild(g("line", { class: "cross", x1: cx, y1: cy - 6, x2: cx, y2: cy + 6 }));
 
+      const addStraight = (x1: number, y1: number, x2: number, y2: number) => {
+        const s = g("line", { class: "spoke", x1, y1, x2, y2 });
+        drawItems.push({ el: s, d: `M${x1},${y1} L${x2},${y2}`, len: Math.hypot(x2 - x1, y2 - y1) });
+        return s;
+      };
       nodes.filter((n) => n.main).forEach((n) => {
-        const s = g("line", { class: "spoke", x1: n.x, y1: n.y, x2: cx, y2: cy });
+        const s = addStraight(n.x, n.y, cx, cy);
         s.dataset.a = n.id;
         svg.appendChild(s);
         lines.push(s);
       });
       nodes.filter((n) => n.parent).forEach((n) => {
         const p = P[n.parent!];
-        const s = g("line", { class: "spoke", x1: p.x, y1: p.y, x2: n.x, y2: n.y });
+        const s = addStraight(p.x, p.y, n.x, n.y);
         s.style.opacity = "0.55";
         s.dataset.a = n.parent!;
         s.dataset.b = n.id;
@@ -252,8 +300,19 @@ export default function IndexField() {
         const mxp = (A.x + B.x) / 2, myp = (A.y + B.y) / 2;
         const dx = B.x - A.x, dy = B.y - A.y, kcurv = 0.22;
         const qx = mxp - dy * kcurv, qy = myp + dx * kcurv;
-        const p = g("path", { class: "edge", d: `M${A.x},${A.y} Q${qx},${qy} ${B.x},${B.y}` });
+        const d = `M${A.x},${A.y} Q${qx},${qy} ${B.x},${B.y}`;
+        const p = g("path", { class: "edge", d });
         p.dataset.a = a; p.dataset.b = b;
+        // Quadratic length by sampling.
+        let len = 0, px = A.x, py = A.y;
+        for (let i = 1; i <= 24; i++) {
+          const t = i / 24, u = 1 - t;
+          const x = u * u * A.x + 2 * u * t * qx + t * t * B.x;
+          const y = u * u * A.y + 2 * u * t * qy + t * t * B.y;
+          len += Math.hypot(x - px, y - py);
+          px = x; py = y;
+        }
+        drawItems.push({ el: p, d, len });
         svg.appendChild(p); lines.push(p);
         if (label) {
           const tx = g("text", { class: "elab", x: (mxp + qx) / 2 + 4, y: (myp + qy) / 2 });
@@ -279,34 +338,45 @@ export default function IndexField() {
         }));
         gg.addEventListener("focus", () => setHover(n));
         gg.addEventListener("blur", () => setHover(null));
+        // Touch: first tap assembles, second tap on the same node navigates.
+        gg.addEventListener("click", (e) => {
+          if (!tap || performance.now() - tap.t > C.TAP_WINDOW_MS) return;
+          const prev = tap.prev;
+          tap = null;
+          if (prev !== n) {
+            e.preventDefault();
+            setHover(n);
+          }
+        });
         svg.appendChild(gg);
       });
 
-      // Node bitmap for pixel sampling.
+      if (!edgesDrawn && !reduce) drawOnLines(drawItems);
+      edgesDrawn = true;
+
+      // Node bitmap → one dot per CSS px.
       mctx.clearRect(0, 0, W, H);
       mctx.fillStyle = "#000";
       mctx.strokeStyle = "#000";
       mctx.textBaseline = "middle";
       nodes.forEach((n) => {
-        mctx.globalAlpha = 1;
         mctx.lineWidth = 1;
         mctx.strokeRect(Math.round(n.x - n.w / 2) + 0.5, Math.round(n.y - n.h / 2) + 0.5, Math.round(n.w), Math.round(n.h));
         mctx.font = `${n.px}px ${monoFamily()}`;
         mctx.fillText(n.lab, Math.round(n.x - n.w / 2 + C.NODE_PAD_X - (n.main ? 0 : 3)), Math.round(n.y) + 0.5);
         if (n.num) {
-          mctx.globalAlpha = 0.5;
           mctx.font = `${C.NUM_PX}px ${monoFamily()}`;
-          mctx.fillText(n.num, Math.round(n.x - n.w / 2), Math.round(n.y - n.h / 2 - 9));
+          mctx.fillText(n.num, Math.round(n.x - n.w / 2), Math.round(n.y - n.h / 2 - C.NUM_OFFSET_Y));
         }
       });
-      mctx.globalAlpha = 1;
       const id = mctx.getImageData(0, 0, mask.width, mask.height).data;
       pts = [];
       byNode = nodes.map(() => []);
       nodes.forEach((n, ni) => {
+        const boxTop = n.y - n.h / 2;
         const x0 = Math.floor((n.x - n.w / 2 - 2) * dpr);
         const x1 = Math.ceil((n.x + n.w / 2 + 2) * dpr);
-        const y0 = Math.floor((n.y - n.h / 2 - 18) * dpr);
+        const y0 = Math.floor((boxTop - 18) * dpr);
         const y1 = Math.ceil((n.y + n.h / 2 + 2) * dpr);
         const st = Math.max(1, Math.round(dpr));
         for (let y = Math.max(0, y0); y < y1; y += st) {
@@ -320,12 +390,9 @@ export default function IndexField() {
                 hx, hy,
                 x: reduce ? hx : hub.x + Math.cos(an) * rr,
                 y: reduce ? hy : hub.y + Math.sin(an) * rr,
-                vx: 0, vy: 0,
-                a: alpha,
-                on: !reduce,
-                rest: 0,
-                held: 0,
-                n: ni,
+                vx: 0, vy: 0, a: alpha,
+                on: !reduce, rest: 0, held: 0, n: ni,
+                num: !!n.num && hy < boxTop - 1,
               };
               pts.push(p);
               byNode[ni].push(p);
@@ -334,6 +401,7 @@ export default function IndexField() {
         }
       });
       setHudParticles(pts.length);
+      setHudNode("—");
       draw();
     }
 
@@ -373,7 +441,7 @@ export default function IndexField() {
       for (let i = 0; i < d.length; i += 16) mean += d[i] + d[i + 1] + d[i + 2];
       mean /= (d.length / 16) * 765;
       const inv = mean > 0.55;
-      const step = narrow ? C.IMG_SAMPLE_STEP : C.IMG_SAMPLE_STEP;
+      const step = C.IMG_SAMPLE_STEP;
       const maxN = narrow ? C.IMG_MAX_MOB : C.IMG_MAX_DESK;
       const out: { x: number; y: number; l: number; r: number; g: number; b: number }[] = [];
       for (let y = 0; y < bh; y += step) {
@@ -382,11 +450,7 @@ export default function IndexField() {
           let l = (d[i] * 0.3 + d[i + 1] * 0.59 + d[i + 2] * 0.11) / 255;
           if (inv) l = 1 - l;
           if (Math.random() < Math.min(1, Math.pow(l, 1.05) * 1.25)) {
-            out.push({
-              x: bx + x + Math.random() * step,
-              y: by + y + Math.random() * step,
-              l, r: d[i], g: d[i + 1], b: d[i + 2],
-            });
+            out.push({ x: bx + x + Math.random() * step, y: by + y + Math.random() * step, l, r: d[i], g: d[i + 1], b: d[i + 2] });
           }
         }
       }
@@ -397,73 +461,89 @@ export default function IndexField() {
       return { pts: out.slice(0, maxN), bx, by, bw, bh };
     }
 
-    function setHover(n: Node | null) {
-      if (n === hov) return;
-      if (hov) {
-        const src = byNode[nodes.indexOf(hov)];
-        parts.forEach((q) => {
-          if (!q.die) {
-            q.die = 1;
-            const h = src[(Math.random() * src.length) | 0] || { hx: hov!.x, hy: hov!.y };
-            q.tx = h.hx; q.ty = h.hy;
-          }
-        });
-        src.forEach((p) => { p.held = 0; });
-      }
-      hov = n;
-      const id = n ? (n.parent || n.id) : null;
-      svg.classList.toggle("on", !!n);
-      lines.forEach((e) => {
-        e.classList.toggle(
-          "hot",
-          !!id && (e.dataset.a === id || e.dataset.b === id || e.dataset.b === (n && n.id))
-        );
-      });
-      setHudNode(n ? (n.parent ? `${n.parent} / ${n.lab}` : n.lab) : "—");
-      lead.classList.remove("show");
-      cap.classList.remove("show");
-      if (!n) return;
+    // Image assembly + leader/caption for the hovered node.
+    function assemble(n: Node) {
       const S = sampleImage(n);
       if (!S) return;
-      const ni = nodes.indexOf(n);
-      const src = byNode[ni];
-      src.forEach((p) => {
-        p.on = true; p.held = 1; p.rest = 0;
-        p.vx += (Math.random() - 0.5) * 3; p.vy += (Math.random() - 0.5) * 3;
-      });
+      const src = byNode[nodes.indexOf(n)];
+      if (!reduce) {
+        src.forEach((p) => {
+          p.on = true; p.held = 1; p.rest = 0;
+          p.vx += (Math.random() - 0.5) * 3; p.vy += (Math.random() - 0.5) * 3;
+        });
+      }
       S.pts.forEach((t, i) => {
         const h = src[(Math.random() * src.length) | 0] || { hx: n.x, hy: n.y };
         parts.push({
-          x: h.hx, y: h.hy,
-          vx: (Math.random() - 0.5) * 4, vy: (Math.random() - 0.5) * 4,
-          tx: t.x, ty: t.y,
-          l: t.l, r: t.r, g: t.g, b: t.b,
-          delay: ((i / S.pts.length) * 26) | 0,
-          die: 0, al: 0,
+          x: reduce ? t.x : h.hx, y: reduce ? t.y : h.hy,
+          vx: reduce ? 0 : (Math.random() - 0.5) * 4, vy: reduce ? 0 : (Math.random() - 0.5) * 4,
+          tx: t.x, ty: t.y, l: t.l, r: t.r, g: t.g, b: t.b,
+          delay: reduce ? 0 : ((i / S.pts.length) * C.IMG_DELAY_FRAMES) | 0,
+          die: 0, al: reduce ? 1 : 0,
         });
       });
-      if (reduce) parts.forEach((q) => { q.x = q.tx; q.y = q.ty; q.al = 1; q.delay = 0; });
       const ax = Math.max(S.bx, Math.min(S.bx + S.bw, n.x));
       const ay = n.y < S.by ? S.by : (n.y > S.by + S.bh ? S.by + S.bh : n.y);
       const ex = ax === n.x ? n.x : (ax < n.x ? n.x - n.w / 2 : n.x + n.w / 2);
       lead.setAttribute("points", `${ex},${n.y} ${ax},${ay}`);
       const mainMatch = MAIN.find((m) => m.id === n.id);
       const label = n.parent ? `${n.parent} / ${n.lab.replace(" ●", "")}` : n.lab;
-      const fig = n.parent ? "" : ` ${mainMatch?.n || ""}`;
+      const fig = n.parent ? "" : (mainMatch?.n || "");
       cap.setAttribute("x", String(S.bx));
       cap.setAttribute("y", String(S.by + S.bh + 14));
-      cap.innerHTML = `<tspan class="k">Fig.${fig.trim() || "·"}</tspan> — ${label} · 대표 이미지(임시)`;
-      requestAnimationFrame(() => { lead.classList.add("show"); cap.classList.add("show"); });
+      cap.innerHTML = `<tspan class="k">Fig.${fig || "·"}</tspan> — ${label} · 대표 이미지(임시)`;
+      // Leader + caption fade in after 250ms (spec §6).
+      clearTimeout(showTimer);
+      showTimer = setTimeout(() => {
+        if (hov !== n) return;
+        lead.classList.add("show");
+        cap.classList.add("show");
+      }, C.LEAD_DELAY_MS);
       if (reduce) draw();
     }
 
-    const col = (): [string, string, string] =>
-      mode === "dark" ? ["#0A0B0C", "#E9E9E3", "#9DB8FF"] : ["#ECEEEE", "#121414", "#1F3FBF"];
+    function setHover(n: Node | null) {
+      if (n === hov) return;
+      if (hov) {
+        const src = byNode[nodes.indexOf(hov)];
+        if (reduce) {
+          parts = [];
+        } else {
+          parts.forEach((q) => {
+            if (!q.die) {
+              q.die = 1;
+              const h = src[(Math.random() * src.length) | 0] || { hx: hov!.x, hy: hov!.y };
+              q.tx = h.hx; q.ty = h.hy;
+            }
+          });
+        }
+        src.forEach((p) => { p.held = 0; });
+      }
+      hov = n;
+      const sec = n ? sectionOf(n) : null;
+      svg.classList.toggle("on", !!n);
+      lines.forEach((e) => {
+        e.classList.toggle("hot", !!sec && (e.dataset.a === sec || e.dataset.b === sec));
+      });
+      setHudNode(n ? (n.parent ? `${n.parent} / ${n.lab}` : n.lab) : "—");
+      clearTimeout(showTimer);
+      lead.classList.remove("show");
+      cap.classList.remove("show");
+      if (!n) {
+        if (reduce) draw();
+        return;
+      }
+      preloadImages();
+      const im = imgs[n.id];
+      if (im && im.complete && im.naturalWidth) assemble(n);
+      else if (im) im.addEventListener("load", () => { if (hov === n) assemble(n); }, { once: true });
+      if (reduce) draw();
+    }
 
     function draw() {
-      const [bg, ink, acc] = col();
+      const isHot = (nd: Node) => !!hov && (nd.id === sectionOf(hov) || nd.parent === sectionOf(hov));
       ctx.clearRect(0, 0, W, H);
-      ctx.fillStyle = bg;
+      ctx.fillStyle = TK.void;
       nodes.forEach((n) => ctx.fillRect(n.x - n.w / 2, n.y - n.h / 2, n.w + 1, n.h + 1));
       lctx.setTransform(1, 0, 0, 1, 0, 0);
       lctx.clearRect(0, 0, layer.width, layer.height);
@@ -474,35 +554,34 @@ export default function IndexField() {
       lctx.fillStyle = "#000";
       for (const p of pts) if (p.on) lctx.fillRect(p.hx - 0.6, p.hy - 0.6, C.BITMAP_ERASE, C.BITMAP_ERASE);
       lctx.globalCompositeOperation = "source-in";
-      lctx.fillStyle = ink;
+      lctx.fillStyle = TK.ink;
       lctx.fillRect(0, 0, W, H);
       lctx.globalCompositeOperation = "source-atop";
-      lctx.fillStyle = acc;
+      // [0n] numbers in --soft
+      lctx.fillStyle = TK.soft;
       nodes.forEach((n) => {
-        if (n.acc) lctx.fillRect(n.x - n.w / 2 - 1, n.y - n.h / 2 - 1, n.w + 3, n.h + 3);
+        if (n.num) lctx.fillRect(n.x - n.w / 2 - 2, n.y - n.h / 2 - 18, n.w + 4, 17);
+      });
+      // AI node + hovered section in --accent
+      lctx.fillStyle = TK.accent;
+      nodes.forEach((n) => {
+        if (n.acc || isHot(n)) lctx.fillRect(n.x - n.w / 2 - 1, n.y - n.h / 2 - 1, n.w + 3, n.h + 3);
       });
       lctx.globalCompositeOperation = "source-over";
       ctx.drawImage(layer, 0, 0, W, H);
       for (const p of pts) {
         if (!p.on) continue;
         const nd = nodes[p.n];
-        const hot = hov && (nd.id === hov.id || nd.parent === hov.id || nd.id === hov.parent);
-        ctx.fillStyle = hot || nd.acc ? acc : ink;
+        ctx.fillStyle = p.num ? TK.soft : (isHot(nd) || nd.acc ? TK.accent : TK.ink);
         ctx.globalAlpha = Math.min(1, 0.4 + p.a);
         ctx.fillRect(p.x, p.y, C.POINT_NODE, C.POINT_NODE);
       }
-      // image dots
-      const light = mode !== "dark";
+      // Image dots (color mode, void background).
       for (const q of parts) {
         if (q.delay > 0 || q.al <= 0) continue;
-        if (colorMode === "color") {
-          const k = light ? 1 : 1.25;
-          ctx.fillStyle = `rgb(${Math.min(255, (q.r * k) | 0)},${Math.min(255, (q.g * k) | 0)},${Math.min(255, (q.b * k) | 0)})`;
-          ctx.globalAlpha = q.al * (light ? 0.95 : Math.min(1, 0.35 + q.l));
-        } else {
-          ctx.fillStyle = ink;
-          ctx.globalAlpha = q.al * Math.min(1, 0.25 + q.l * 0.9);
-        }
+        const k = 1.25;
+        ctx.fillStyle = `rgb(${Math.min(255, (q.r * k) | 0)},${Math.min(255, (q.g * k) | 0)},${Math.min(255, (q.b * k) | 0)})`;
+        ctx.globalAlpha = q.al * Math.min(1, 0.35 + q.l);
         ctx.fillRect(q.x, q.y, C.POINT_IMG, C.POINT_IMG);
       }
       ctx.globalAlpha = 1;
@@ -510,6 +589,7 @@ export default function IndexField() {
 
     function step() {
       const R = C.REPEL_R, R2 = R * R;
+      const now = performance.now();
       for (const p of pts) {
         const dx = p.x - mx, dy = p.y - my, d2 = dx * dx + dy * dy;
         if (d2 < R2) {
@@ -522,8 +602,8 @@ export default function IndexField() {
         if (!p.on) continue;
         let tx = p.hx, ty = p.hy;
         if (p.held) {
-          tx += Math.sin(p.hx * 0.7 + performance.now() * 0.004) * C.IMG_HOVER_JITTER;
-          ty += Math.cos(p.hy * 0.7 + performance.now() * 0.004) * C.IMG_HOVER_JITTER;
+          tx += Math.sin(p.hx * 0.7 + now * 0.004) * C.IMG_HOVER_JITTER;
+          ty += Math.cos(p.hy * 0.7 + now * 0.004) * C.IMG_HOVER_JITTER;
         }
         p.vx += (tx - p.x) * C.NODE_SPRING;
         p.vy += (ty - p.y) * C.NODE_SPRING;
@@ -545,8 +625,8 @@ export default function IndexField() {
         if (!q.die) {
           q.al = Math.min(1, q.al + C.IMG_ALPHA_IN);
           const dx = q.x - mx, dy = q.y - my, d2 = dx * dx + dy * dy;
-          if (d2 < 1600) {
-            const f = (1 - d2 / 1600) * 1.6;
+          if (d2 < R2) {
+            const f = (1 - d2 / R2) * 1.6;
             const dd = Math.sqrt(d2) || 1;
             q.vx += (dx / dd) * f; q.vy += (dy / dd) * f;
           }
@@ -559,33 +639,53 @@ export default function IndexField() {
 
     function loop() { step(); draw(); raf = requestAnimationFrame(loop); }
 
-    // Pointer events
+    // ── Pointer / touch ─────────────────────────────────────────────────────
+    let tap: { prev: Node | null; t: number } | null = null;
+    const onDown = (e: PointerEvent) => {
+      preloadImages();
+      if (e.pointerType === "touch") tap = { prev: hov, t: performance.now() };
+    };
     const onMove = (e: PointerEvent) => {
+      preloadImages();
+      if (e.pointerType === "touch") return; // touch hover is driven by taps
       const r = host.getBoundingClientRect();
       mx = e.clientX - r.left; my = e.clientY - r.top;
       setHudCursor(`${mx | 0},${my | 0}`);
       const n = nodes.find((n) => Math.abs(mx - n.x) < n.w / 2 + 6 && Math.abs(my - n.y) < n.h / 2 + 6) || null;
       if (n !== hov) setHover(n);
     };
-    const onLeave = () => {
+    const onLeave = (e: PointerEvent) => {
+      if (e.pointerType === "touch") return;
       mx = my = -9999;
       setHudCursor("—");
       setHover(null);
     };
+    // Tap on empty field clears the touch hover.
+    const onHostClick = (e: MouseEvent) => {
+      if (!tap) return;
+      if ((e.target as Element).closest?.("a.node")) return;
+      tap = null;
+      setHover(null);
+    };
+    const onFocusIn = () => preloadImages();
+    host.addEventListener("pointerdown", onDown, true);
     host.addEventListener("pointermove", onMove);
     host.addEventListener("pointerleave", onLeave);
+    host.addEventListener("click", onHostClick);
+    host.addEventListener("focusin", onFocusIn);
 
+    // ── Start (bitmap only after fonts are ready, spec §4) ─────────────────
+    let visible = true;
     function start() {
-      if (!host.getBoundingClientRect().width) return;
-      hov = null;
+      if (!fontsReady || !host.getBoundingClientRect().width) return;
       layout();
-      if (!reduce) {
+      if (!reduce && visible) {
         cancelAnimationFrame(raf);
         raf = requestAnimationFrame(loop);
       }
     }
     const readyP = document.fonts?.ready ?? Promise.resolve();
-    readyP.then(start);
+    readyP.then(() => { fontsReady = true; start(); });
 
     let resizeTO: ReturnType<typeof setTimeout> | undefined;
     const onResize = () => {
@@ -596,7 +696,8 @@ export default function IndexField() {
 
     const io = new IntersectionObserver((entries) => {
       entries.forEach((e) => {
-        if (reduce) return;
+        visible = e.isIntersecting;
+        if (reduce || !fontsReady) return;
         if (e.isIntersecting) {
           if (!pts.length) layout();
           cancelAnimationFrame(raf);
@@ -608,9 +709,13 @@ export default function IndexField() {
 
     return () => {
       cancelAnimationFrame(raf);
+      clearTimeout(showTimer);
       window.removeEventListener("resize", onResize);
+      host.removeEventListener("pointerdown", onDown, true);
       host.removeEventListener("pointermove", onMove);
       host.removeEventListener("pointerleave", onLeave);
+      host.removeEventListener("click", onHostClick);
+      host.removeEventListener("focusin", onFocusIn);
       io.disconnect();
       if (resizeTO) clearTimeout(resizeTO);
     };
@@ -622,10 +727,15 @@ export default function IndexField() {
       className="hX"
       data-mode="dark"
       style={{
-        position: "fixed",
-        inset: 0,
-        background: "#0A0B0C",
-        color: "#E9E9E3",
+        ...homeTokenStyle,
+        position: "relative",
+        height: "100svh",
+        minHeight: C.MIN_H,
+        // Cancel the layout's <main className="pt-20"> so the hero starts at 0
+        // under the fixed header (layout.tsx is out of scope for 41a).
+        marginTop: "-5rem",
+        background: "var(--void)",
+        color: "var(--ink)",
         overflow: "hidden",
         fontFamily: "var(--font-pp-lettra-mono)",
       }}
@@ -634,23 +744,24 @@ export default function IndexField() {
         .hX .grid{position:absolute;inset:0;background-image:linear-gradient(#1A1D20 1px,transparent 1px),linear-gradient(90deg,#1A1D20 1px,transparent 1px);background-size:40px 40px;opacity:.6;pointer-events:none}
         .hX canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
         .hX svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
-        .hX .edge{fill:none;stroke:#E9E9E3;stroke-width:.8;stroke-dasharray:3 4;opacity:.75;transition:stroke .2s,opacity .2s}
-        .hX .spoke{fill:none;stroke:#E9E9E3;stroke-width:.6;opacity:.35}
-        .hX .orbit{fill:none;stroke:#E9E9E3;stroke-width:.6;opacity:.22}
+        .hX .edge{fill:none;stroke:var(--ink);stroke-width:.8;stroke-dasharray:3 4;opacity:.75;transition:stroke .2s,opacity .2s}
+        .hX .spoke{fill:none;stroke:var(--ink);stroke-width:.6;opacity:.35}
+        .hX .orbit{fill:none;stroke:var(--ink);stroke-width:.6;opacity:.22}
         .hX svg.on .edge,.hX svg.on .spoke{opacity:.12}
-        .hX .hot{stroke:#9DB8FF!important;opacity:1!important;stroke-width:1.4;stroke-dasharray:none}
-        .hX .node{cursor:pointer;outline:none}
+        .hX .hot{stroke:var(--accent)!important;opacity:1!important;stroke-width:1.4;stroke-dasharray:none}
+        .hX a.node{cursor:pointer;outline:none;border:0}
+        .hX a.node:hover{opacity:1}
         .hX .node rect.hit{fill:transparent;stroke:none}
-        .hX .node:focus-visible rect.hit{stroke:#9DB8FF;stroke-width:1.5;stroke-dasharray:2 2}
-        .hX .lead{stroke:#9DB8FF;stroke-width:.8;fill:none;opacity:0;transition:opacity .3s}
-        .hX .lead.show{opacity:1}
-        .hX .cap{font-family:var(--font-pp-lettra-mono);font-size:10px;fill:#6E7378;opacity:0;transition:opacity .4s .25s}
-        .hX .cap.show{opacity:1}
-        .hX .cap tspan.k{fill:#9DB8FF}
-        .hX .elab{font-family:var(--font-pp-lettra-mono);font-size:8.5px;fill:#6E7378}
-        .hX .cross{stroke:#E9E9E3;stroke-width:.7;opacity:.6}
-        .hX .hud{position:absolute;font-size:10.5px;line-height:1.6;color:#6E7378;z-index:3;font-family:var(--font-pp-lettra-mono)}
-        .hX .hud b{color:#E9E9E3;font-weight:400}
+        .hX .node:focus-visible rect.hit{stroke:var(--accent);stroke-width:1.5;stroke-dasharray:2 2}
+        .hX .lead{stroke:var(--accent);stroke-width:.8;fill:none;opacity:0;transition:opacity .15s}
+        .hX .lead.show{opacity:1;transition:opacity .3s}
+        .hX .cap{font-family:var(--font-pp-lettra-mono);font-size:10px;fill:var(--soft);opacity:0;transition:opacity .15s}
+        .hX .cap.show{opacity:1;transition:opacity .4s}
+        .hX .cap tspan.k{fill:var(--accent)}
+        .hX .elab{font-family:var(--font-pp-lettra-mono);font-size:8.5px;fill:var(--soft)}
+        .hX .cross{stroke:var(--ink);stroke-width:.7;opacity:.6}
+        .hX .hud{position:absolute;font-size:10.5px;line-height:1.6;color:var(--soft);z-index:3;font-family:var(--font-pp-lettra-mono)}
+        .hX .hud b{color:var(--ink);font-weight:400}
       `}</style>
       <div className="grid" aria-hidden="true" />
       <svg ref={svgRef} aria-label="luckyzz.kr 사이트 구조" />
@@ -663,8 +774,8 @@ export default function IndexField() {
         CURSOR <b>{hudCursor}</b>
         <br />NODE <b>{hudNode}</b>
       </div>
-      {/* SSR fallback for accessibility — hidden visually but present for crawlers */}
-      <ul className="sr-only" aria-hidden="false" style={{ position: "absolute", left: -9999, top: -9999 }}>
+      {/* SSR fallback for accessibility / crawlers */}
+      <ul style={{ position: "absolute", left: -9999, top: -9999 }}>
         {MAIN.map((m) => (
           <li key={m.id}>
             <a href={m.route}>{m.label}</a>

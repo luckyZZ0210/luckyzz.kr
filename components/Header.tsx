@@ -2,28 +2,37 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { homeTokenStyle } from "@/components/home/tokens";
 
 export default function Header() {
   const pathname = usePathname();
   const isHome = pathname === "/";
 
   if (isHome) {
+    // Inline styles on purpose: globals.css has unlayered `* { padding: 0 }`
+    // and `a { color; border-bottom }` that override Tailwind utilities.
     return (
       <header
-        className="fixed top-0 left-0 right-0 z-50 flex items-baseline justify-between gap-3 px-5 py-[14px] text-[11px]"
+        className="hdr-home fixed top-0 left-0 right-0 z-50 flex items-baseline justify-between"
         style={{
-          background: "#0A0B0C",
-          color: "#E9E9E3",
-          borderBottom: "1px solid #E9E9E3",
+          ...homeTokenStyle,
+          gap: 12,
+          padding: "14px 20px",
+          fontSize: 11,
+          background: "var(--void)",
+          color: "var(--ink)",
+          borderBottom: "1px solid var(--ink)",
           fontFamily: "var(--font-pp-lettra-mono)",
         }}
       >
+        <style>{`.hdr-home a:hover{opacity:1}`}</style>
         <Link
           href="/"
-          className="border-0"
           style={{
+            color: "var(--ink)",
+            borderBottom: "none",
             fontFamily: "var(--font-mulche)",
-            fontSize: "22px",
+            fontSize: 22,
             lineHeight: 1,
             letterSpacing: "0.01em",
           }}
